@@ -37,14 +37,13 @@ struct LinkEntry {
 struct CardLayout {
     size_t entryIndex{};
     RectI rect;
+    bool active{};
 };
 
 struct Layout {
     RectI addButton;
-    RectI leftButton;
-    RectI rightButton;
-    bool showLeft{};
-    bool showRight{};
+    RectI moveHandle;
+    RectI resizeHandle;
     int visibleSlots{};
     std::vector<CardLayout> cards;
 };

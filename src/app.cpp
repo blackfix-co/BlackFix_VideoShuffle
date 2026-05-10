@@ -3,6 +3,7 @@
 #include "add_dialog.hpp"
 #include "storage.hpp"
 #include "thumbnail.hpp"
+#include "updater.hpp"
 #include "utils.hpp"
 
 #include <windowsx.h>
@@ -36,10 +37,9 @@ struct AppState {
     enum class PressTarget {
         None,
         Add,
-        Left,
-        Right,
         Card,
-        Move
+        Move,
+        Resize
     } pressTarget{PressTarget::None};
 };
 
@@ -130,11 +130,11 @@ AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryI
     if (ContainsExpanded(layout.addButton, point, 10)) {
         return AppState::PressTarget::Add;
     }
-    if (layout.showLeft && ContainsExpanded(layout.leftButton, point, 16)) {
-        return AppState::PressTarget::Left;
+    if (ContainsExpanded(layout.moveHandle, point, 14)) {
+        return AppState::PressTarget::Move;
     }
-    if (layout.showRight && ContainsExpanded(layout.rightButton, point, 16)) {
-        return AppState::PressTarget::Right;
+    if (ContainsExpanded(layout.resizeHandle, point, 16)) {
+        return AppState::PressTarget::Resize;
     }
     for (const auto& card : layout.cards) {
         if (ContainsExpanded(card.rect, point, 8)) {
@@ -142,17 +142,17 @@ AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryI
             return AppState::PressTarget::Card;
         }
     }
-    return AppState::PressTarget::Move;
+    return AppState::PressTarget::None;
 }
 
 bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget target, size_t entryIndex) {
     switch (target) {
     case AppState::PressTarget::Add:
         return ContainsExpanded(layout.addButton, point, 10);
-    case AppState::PressTarget::Left:
-        return layout.showLeft && ContainsExpanded(layout.leftButton, point, 16);
-    case AppState::PressTarget::Right:
-        return layout.showRight && ContainsExpanded(layout.rightButton, point, 16);
+    case AppState::PressTarget::Move:
+        return ContainsExpanded(layout.moveHandle, point, 14);
+    case AppState::PressTarget::Resize:
+        return ContainsExpanded(layout.resizeHandle, point, 16);
     case AppState::PressTarget::Card:
         for (const auto& card : layout.cards) {
             if (card.entryIndex == entryIndex && ContainsExpanded(card.rect, point, 8)) {
@@ -161,13 +161,17 @@ bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget 
         }
         return false;
     default:
-        return true;
+        return false;
     }
 }
 
 void ApplyCursorForTarget(AppState::PressTarget target) {
     if (target == AppState::PressTarget::Move) {
         SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    } else if (target == AppState::PressTarget::Resize) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZENESW));
+    } else if (target == AppState::PressTarget::None) {
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
     } else {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
     }
@@ -182,6 +186,23 @@ void MoveWindowFromDrag(HWND hwnd, POINT screenPoint) {
     int width = g_app.pressWindow.right - g_app.pressWindow.left;
     int height = g_app.pressWindow.bottom - g_app.pressWindow.top;
     SetWindowPos(hwnd, nullptr, g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
+    int dx = screenPoint.x - g_app.pressScreen.x;
+    int dy = screenPoint.y - g_app.pressScreen.y;
+    if (std::abs(dx) > 2 || std::abs(dy) > 2) {
+        g_app.mouseMoved = true;
+    }
+
+    int originalWidth = g_app.pressWindow.right - g_app.pressWindow.left;
+    int originalHeight = g_app.pressWindow.bottom - g_app.pressWindow.top;
+    int minWidth = 280;
+    int minHeight = 180;
+    int newWidth = std::max(minWidth, originalWidth - dx);
+    int newHeight = std::max(minHeight, originalHeight + dy);
+    int newX = g_app.pressWindow.right - newWidth;
+    SetWindowPos(hwnd, nullptr, newX, g_app.pressWindow.top, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void DragScrollCards(POINT point) {
@@ -241,15 +262,12 @@ void FinishPress(HWND hwnd, POINT point) {
         }
         break;
     }
-    case AppState::PressTarget::Left:
-        ScrollBy(-std::max(1, layout.visibleSlots));
-        break;
-    case AppState::PressTarget::Right:
-        ScrollBy(std::max(1, layout.visibleSlots));
-        break;
     case AppState::PressTarget::Card:
-        if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
+        if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && static_cast<int>(g_app.pressEntryIndex) == g_app.scrollIndex) {
             OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
+        } else if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
+            g_app.scrollIndex = static_cast<int>(g_app.pressEntryIndex);
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
         break;
     default:
@@ -265,26 +283,12 @@ void LoadThumbnails() {
     }
 }
 
-int PageLimit(int visibleSlots) {
-    return std::max(0, static_cast<int>(g_app.entries.size()) - visibleSlots);
-}
-
-void ClampScroll(int visibleSlots) {
-    g_app.scrollIndex = std::clamp(g_app.scrollIndex, 0, PageLimit(visibleSlots));
-}
-
-int MaxSlotsForWidth(int width, bool hasNavigation) {
-    int margin = 24;
-    int gap = 16;
-    int navigationSpace = hasNavigation ? 76 : 0;
-    int availableWidth = std::max(96, width - margin * 2 - navigationSpace);
-    return std::clamp((availableWidth + gap) / (96 + gap), 1, 3);
-}
-
 Layout BuildLayout(int width, int height) {
     Layout layout;
     int buttonSize = 42;
     layout.addButton = {std::max(12, width - buttonSize - 16), 14, buttonSize, buttonSize};
+    layout.moveHandle = {std::max(12, width / 2 - 42), std::max(12, height - 42), 84, 30};
+    layout.resizeHandle = {12, std::max(12, height - 44), 44, 32};
 
     int count = static_cast<int>(g_app.entries.size());
     if (count == 0) {
@@ -292,39 +296,45 @@ Layout BuildLayout(int width, int height) {
         return layout;
     }
 
-    int slots = std::min(count, MaxSlotsForWidth(width, false));
-    bool hasNavigation = count > slots;
-    slots = std::min(count, MaxSlotsForWidth(width, hasNavigation));
-    hasNavigation = count > slots;
-    layout.visibleSlots = slots;
-    ClampScroll(slots);
-
-    int margin = 24;
-    int gap = 16;
-    int navSpace = hasNavigation ? 76 : 0;
-    int availableWidth = std::max(96, width - margin * 2 - navSpace);
-    int cardWidth = std::min(136, (availableWidth - gap * (slots - 1)) / slots);
-    cardWidth = std::max(86, cardWidth);
-    int availableHeight = std::max(92, height - 88);
-    int cardHeight = std::clamp(static_cast<int>(cardWidth * 1.55), 110, availableHeight);
-    int totalWidth = cardWidth * slots + gap * (slots - 1);
-    int startX = (width - totalWidth) / 2;
-    int startY = 64 + (availableHeight - cardHeight) / 2;
-
-    for (int i = 0; i < slots; ++i) {
-        size_t entryIndex = static_cast<size_t>(g_app.scrollIndex + i);
-        if (entryIndex < g_app.entries.size()) {
-            layout.cards.push_back({entryIndex, {startX + i * (cardWidth + gap), startY, cardWidth, cardHeight}});
-        }
+    layout.visibleSlots = std::min(count, 3);
+    if (count > 0) {
+        g_app.scrollIndex = (g_app.scrollIndex % count + count) % count;
     }
 
-    if (hasNavigation) {
-        int arrowSize = 34;
-        int arrowY = startY + (cardHeight - arrowSize) / 2;
-        layout.leftButton = {std::max(8, startX - arrowSize - 18), arrowY, arrowSize, arrowSize};
-        layout.rightButton = {std::min(width - arrowSize - 8, startX + totalWidth + 18), arrowY, arrowSize, arrowSize};
-        layout.showLeft = g_app.scrollIndex > 0;
-        layout.showRight = g_app.scrollIndex < PageLimit(slots);
+    int top = 58;
+    int bottom = 58;
+    int gap = 18;
+    int availableHeight = std::max(96, height - top - bottom);
+    int centerWidth = std::clamp((width - 76) / 3, 92, 150);
+    int sideWidth = std::max(72, static_cast<int>(centerWidth * 0.78));
+    int totalWidth = sideWidth * 2 + centerWidth + gap * 2;
+    if (totalWidth > width - 24) {
+        double scale = static_cast<double>(std::max(180, width - 24)) / static_cast<double>(totalWidth);
+        centerWidth = std::max(82, static_cast<int>(centerWidth * scale));
+        sideWidth = std::max(64, static_cast<int>(sideWidth * scale));
+    }
+
+    int centerHeight = std::clamp(static_cast<int>(centerWidth * 1.52), 112, availableHeight);
+    int sideHeight = std::clamp(static_cast<int>(centerHeight * 0.82), 92, availableHeight);
+    int centerX = (width - centerWidth) / 2;
+    int centerY = top + (availableHeight - centerHeight) / 2;
+    int sideY = centerY + (centerHeight - sideHeight) / 2;
+    int leftX = centerX - gap - sideWidth;
+    int rightX = centerX + centerWidth + gap;
+
+    auto wrapIndex = [count](int index) {
+        return static_cast<size_t>((index % count + count) % count);
+    };
+
+    if (count == 1) {
+        layout.cards.push_back({0, {centerX, centerY, centerWidth, centerHeight}, true});
+    } else if (count == 2) {
+        layout.cards.push_back({wrapIndex(g_app.scrollIndex + 1), {rightX, sideY, sideWidth, sideHeight}, false});
+        layout.cards.push_back({wrapIndex(g_app.scrollIndex), {centerX, centerY, centerWidth, centerHeight}, true});
+    } else {
+        layout.cards.push_back({wrapIndex(g_app.scrollIndex - 1), {leftX, sideY, sideWidth, sideHeight}, false});
+        layout.cards.push_back({wrapIndex(g_app.scrollIndex + 1), {rightX, sideY, sideWidth, sideHeight}, false});
+        layout.cards.push_back({wrapIndex(g_app.scrollIndex), {centerX, centerY, centerWidth, centerHeight}, true});
     }
 
     return layout;
@@ -344,8 +354,9 @@ void DrawText(Graphics& graphics, const std::wstring& text, RectF bounds, float 
     graphics.DrawString(text.c_str(), -1, &font, bounds, &format, &brush);
 }
 
-void DrawCard(Graphics& graphics, const RectI& rect, const LinkEntry& entry) {
-    SolidBrush fallback(Color(255, 128, 128, 128));
+void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry) {
+    const RectI& rect = card.rect;
+    SolidBrush fallback(card.active ? Color(255, 128, 128, 128) : Color(255, 112, 112, 112));
     graphics.FillRectangle(&fallback, rect.x, rect.y, rect.w, rect.h);
 
     if (entry.thumbnail) {
@@ -362,10 +373,11 @@ void DrawCard(Graphics& graphics, const RectI& rect, const LinkEntry& entry) {
     }
 
     RectI titleBar{rect.x, rect.y + rect.h - 42, rect.w, 42};
-    SolidBrush titleBrush(Color(255, 92, 109, 132));
+    SolidBrush titleBrush(card.active ? Color(255, 92, 109, 132) : Color(255, 84, 95, 112));
     graphics.FillRectangle(&titleBrush, titleBar.x, titleBar.y, titleBar.w, titleBar.h);
     std::wstring title = entry.title.empty() ? L"제목 없음" : entry.title;
-    DrawText(graphics, title, RectF(static_cast<float>(rect.x + 10), static_cast<float>(rect.y + rect.h - 39), static_cast<float>(rect.w - 20), 34.0f), 15.0f, Color(255, 245, 248, 252), StringAlignmentCenter);
+    float fontSize = card.active ? 15.0f : 13.0f;
+    DrawText(graphics, title, RectF(static_cast<float>(rect.x + 10), static_cast<float>(rect.y + rect.h - 39), static_cast<float>(rect.w - 20), 34.0f), fontSize, Color(255, 245, 248, 252), StringAlignmentCenter);
 }
 
 void DrawAddButton(Graphics& graphics, const RectI& rect) {
@@ -378,22 +390,29 @@ void DrawAddButton(Graphics& graphics, const RectI& rect) {
     graphics.DrawLine(&pen, cx, cy - 13.0f, cx, cy + 13.0f);
 }
 
-void DrawArrowButton(Graphics& graphics, const RectI& rect, bool right) {
+void DrawMoveHandle(Graphics& graphics, const RectI& rect) {
     SolidBrush brush(Color(255, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     Pen pen(Color(255, 0, 0, 0), 4.0f);
     float centerX = static_cast<float>(rect.x + rect.w / 2);
     float centerY = static_cast<float>(rect.y + rect.h / 2);
-    float direction = right ? 1.0f : -1.0f;
-    graphics.DrawLine(&pen, centerX - 7.0f * direction, centerY - 11.0f, centerX + 7.0f * direction, centerY);
-    graphics.DrawLine(&pen, centerX + 7.0f * direction, centerY, centerX - 7.0f * direction, centerY + 11.0f);
+    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX + 18.0f, centerY);
+    graphics.DrawLine(&pen, centerX, centerY - 9.0f, centerX, centerY + 9.0f);
+    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX - 10.0f, centerY - 7.0f);
+    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX - 10.0f, centerY + 7.0f);
+    graphics.DrawLine(&pen, centerX + 18.0f, centerY, centerX + 10.0f, centerY - 7.0f);
+    graphics.DrawLine(&pen, centerX + 18.0f, centerY, centerX + 10.0f, centerY + 7.0f);
 }
 
-void DrawResizeGrip(Graphics& graphics, int width, int height) {
-    Pen pen(Color(255, 70, 80, 96), 3.0f);
-    graphics.DrawLine(&pen, width - 28, height - 7, width - 7, height - 28);
-    graphics.DrawLine(&pen, width - 20, height - 7, width - 7, height - 20);
-    graphics.DrawLine(&pen, width - 12, height - 7, width - 7, height - 12);
+void DrawResizeHandle(Graphics& graphics, const RectI& rect) {
+    SolidBrush brush(Color(255, 110, 126, 150));
+    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
+    Pen pen(Color(255, 0, 0, 0), 3.0f);
+    int left = rect.x + 8;
+    int bottom = rect.y + rect.h - 7;
+    graphics.DrawLine(&pen, left, bottom, left + 21, bottom - 21);
+    graphics.DrawLine(&pen, left + 10, bottom, left + 21, bottom - 11);
+    graphics.DrawLine(&pen, left, bottom - 10, left + 11, bottom - 21);
 }
 
 void PaintWindow(HWND hwnd) {
@@ -434,16 +453,11 @@ void PaintWindow(HWND hwnd) {
 
         Layout layout = BuildLayout(width, height);
         for (const auto& card : layout.cards) {
-            DrawCard(graphics, card.rect, g_app.entries[card.entryIndex]);
-        }
-        if (layout.showLeft) {
-            DrawArrowButton(graphics, layout.leftButton, false);
-        }
-        if (layout.showRight) {
-            DrawArrowButton(graphics, layout.rightButton, true);
+            DrawCard(graphics, card, g_app.entries[card.entryIndex]);
         }
         DrawAddButton(graphics, layout.addButton);
-        DrawResizeGrip(graphics, width, height);
+        DrawMoveHandle(graphics, layout.moveHandle);
+        DrawResizeHandle(graphics, layout.resizeHandle);
         graphics.Flush(FlushIntentionFlush);
     }
 
@@ -454,56 +468,13 @@ void PaintWindow(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
-int HitResizeEdge(HWND hwnd, POINT point) {
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    int width = client.right - client.left;
-    int height = client.bottom - client.top;
-    int edge = 18;
-    bool left = point.x < edge;
-    bool right = point.x >= width - edge;
-    bool top = point.y < edge;
-    bool bottom = point.y >= height - edge;
-
-    if (top && left) {
-        return HTTOPLEFT;
-    }
-    if (top && right) {
-        return HTTOPRIGHT;
-    }
-    if (bottom && left) {
-        return HTBOTTOMLEFT;
-    }
-    if (bottom && right) {
-        return HTBOTTOMRIGHT;
-    }
-    if (left) {
-        return HTLEFT;
-    }
-    if (right) {
-        return HTRIGHT;
-    }
-    if (top) {
-        return HTTOP;
-    }
-    if (bottom) {
-        return HTBOTTOM;
-    }
-    return HTNOWHERE;
-}
-
 void AddEntry(const AddResult& result) {
     LinkEntry entry;
     entry.title = result.title.empty() ? L"제목 없음" : result.title;
     entry.url = result.url;
     entry.thumbnail = LoadThumbnail(entry.url);
     g_app.entries.push_back(std::move(entry));
-    RECT client{};
-    GetClientRect(g_app.window, &client);
-    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
-    if (layout.visibleSlots > 0) {
-        g_app.scrollIndex = PageLimit(layout.visibleSlots);
-    }
+    g_app.scrollIndex = static_cast<int>(g_app.entries.size()) - 1;
     SaveLinks(g_app.entries);
     InvalidateRect(g_app.window, nullptr, FALSE);
 }
@@ -513,14 +484,15 @@ void OpenUrl(const std::wstring& url) {
 }
 
 void ScrollBy(int delta) {
-    RECT client{};
-    GetClientRect(g_app.window, &client);
-    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
-    if (layout.visibleSlots <= 0) {
+    int count = static_cast<int>(g_app.entries.size());
+    if (count <= 1) {
         return;
     }
     int before = g_app.scrollIndex;
-    g_app.scrollIndex = std::clamp(g_app.scrollIndex + delta, 0, PageLimit(layout.visibleSlots));
+    g_app.scrollIndex = (g_app.scrollIndex + delta) % count;
+    if (g_app.scrollIndex < 0) {
+        g_app.scrollIndex += count;
+    }
     if (before != g_app.scrollIndex) {
         InvalidateRect(g_app.window, nullptr, FALSE);
     }
@@ -549,15 +521,11 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         POINT screenPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         POINT point = screenPoint;
         ScreenToClient(hwnd, &point);
-        int resize = HitResizeEdge(hwnd, point);
-        if (resize != HTNOWHERE) {
-            return resize;
-        }
         RECT client{};
         GetClientRect(hwnd, &client);
         Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
         size_t entryIndex = 0;
-        return TargetAt(layout, point, entryIndex) == AppState::PressTarget::Move ? HTCAPTION : HTCLIENT;
+        return TargetAt(layout, point, entryIndex) == AppState::PressTarget::None ? HTTRANSPARENT : HTCLIENT;
     }
     case WM_LBUTTONDOWN: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -573,6 +541,8 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             ClientToScreen(hwnd, &screenPoint);
             if (g_app.pressTarget == AppState::PressTarget::Move) {
                 MoveWindowFromDrag(hwnd, screenPoint);
+            } else if (g_app.pressTarget == AppState::PressTarget::Resize) {
+                ResizeWindowFromDrag(hwnd, screenPoint);
             } else if (g_app.pressTarget == AppState::PressTarget::Card) {
                 DragScrollCards(point);
             }
@@ -664,6 +634,10 @@ void RegisterMainClass(HINSTANCE instance) {
 }
 
 int RunApp(HINSTANCE instance, int showCommand) {
+    if (CheckForUpdateAndRestart()) {
+        return 0;
+    }
+
     g_app.instance = instance;
 
     GdiplusStartupInput gdiplusInput;

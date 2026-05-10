@@ -5,9 +5,11 @@ project(BlackFix_VideoShuffle LANGUAGES CXX)
 add_executable(BlackFix_VideoShuffle WIN32
     src/add_dialog.cpp
     src/app.cpp
+    src/http.cpp
     src/main.cpp
     src/storage.cpp
     src/thumbnail.cpp
+    src/updater.cpp
     src/utils.cpp
 )
 
