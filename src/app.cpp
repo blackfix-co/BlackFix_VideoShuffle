@@ -10,10 +10,13 @@
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <cwctype>
 
 using namespace Gdiplus;
 
@@ -69,14 +72,74 @@ std::wstring CurrentExePath() {
     return path;
 }
 
+bool IsDevelopmentPath(const std::wstring& path) {
+    std::wstring value = path;
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return value.find(L"\\build\\") != std::wstring::npos;
+}
+
 void EnableStartup() {
+    std::wstring exePath = CurrentExePath();
+    if (IsDevelopmentPath(exePath)) {
+        return;
+    }
+
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
         return;
     }
-    std::wstring command = L"\"" + CurrentExePath() + L"\"";
+    std::wstring command = L"\"" + exePath + L"\"";
     RegSetValueExW(key, L"BlackFix_VideoShuffle", 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()), static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
+}
+
+void CreateDesktopShortcut() {
+    std::wstring exePath = CurrentExePath();
+    if (IsDevelopmentPath(exePath)) {
+        return;
+    }
+
+    PWSTR desktopPath = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, KF_FLAG_CREATE, nullptr, &desktopPath))) {
+        return;
+    }
+
+    std::wstring shortcutPath = desktopPath;
+    CoTaskMemFree(desktopPath);
+    if (!shortcutPath.empty() && shortcutPath.back() != L'\\') {
+        shortcutPath += L'\\';
+    }
+    shortcutPath += L"BlackFix_VideoShuffle.lnk";
+
+    HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool shouldUninitialize = SUCCEEDED(init);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE) {
+        return;
+    }
+
+    IShellLinkW* link = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) {
+        link->SetPath(exePath.c_str());
+        size_t slash = exePath.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            std::wstring workingDirectory = exePath.substr(0, slash);
+            link->SetWorkingDirectory(workingDirectory.c_str());
+        }
+        link->SetDescription(L"BlackFix VideoShuffle");
+
+        IPersistFile* file = nullptr;
+        if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+            file->Save(shortcutPath.c_str(), TRUE);
+            file->Release();
+        }
+        link->Release();
+    }
+
+    if (shouldUninitialize) {
+        CoUninitialize();
+    }
 }
 
 WindowSettings DefaultWindowSettings() {
@@ -90,6 +153,36 @@ WindowSettings DefaultWindowSettings() {
     settings.x = screenX + (screenW - settings.width) / 2;
     settings.y = screenY + (screenH - settings.height) / 2;
     settings.valid = true;
+    return settings;
+}
+
+WindowSettings EnsureVisible(WindowSettings settings) {
+    if (!settings.valid) {
+        return DefaultWindowSettings();
+    }
+
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    settings.width = std::clamp(settings.width, 280, std::max(280, screenW));
+    settings.height = std::clamp(settings.height, 180, std::max(180, screenH));
+
+    RECT window{settings.x, settings.y, settings.x + settings.width, settings.y + settings.height};
+    RECT screen{screenX, screenY, screenX + screenW, screenY + screenH};
+    RECT intersection{};
+    if (!IntersectRect(&intersection, &window, &screen)) {
+        return DefaultWindowSettings();
+    }
+
+    int visibleWidth = intersection.right - intersection.left;
+    int visibleHeight = intersection.bottom - intersection.top;
+    if (visibleWidth < 80 || visibleHeight < 80) {
+        return DefaultWindowSettings();
+    }
+
+    settings.x = std::clamp(settings.x, screenX - settings.width + 80, screenX + screenW - 80);
+    settings.y = std::clamp(settings.y, screenY - settings.height + 80, screenY + screenH - 80);
     return settings;
 }
 
@@ -874,6 +967,7 @@ int RunApp(HINSTANCE instance, int showCommand) {
     RegisterMainClass(instance);
     RegisterAddDialogClass(instance);
     EnableStartup();
+    CreateDesktopShortcut();
 
     g_app.entries = LoadLinks();
     LoadThumbnails();
@@ -882,6 +976,7 @@ int RunApp(HINSTANCE instance, int showCommand) {
     if (!g_app.settings.valid) {
         g_app.settings = DefaultWindowSettings();
     }
+    g_app.settings = EnsureVisible(g_app.settings);
 
     g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, kMainClassName, L"BlackFix VideoShuffle", WS_POPUP, g_app.settings.x, g_app.settings.y, g_app.settings.width, g_app.settings.height, nullptr, nullptr, instance, nullptr);
     if (!g_app.window) {
