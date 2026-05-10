@@ -1,6 +1,7 @@
 #include "app.hpp"
 
 #include "add_dialog.hpp"
+#include "delete_dialog.hpp"
 #include "storage.hpp"
 #include "thumbnail.hpp"
 #include "updater.hpp"
@@ -17,8 +18,8 @@ using namespace Gdiplus;
 
 namespace {
 
-constexpr COLORREF kTransparentColor = RGB(255, 0, 255);
 constexpr wchar_t kMainClassName[] = L"BlackFixVideoShuffleWindow";
+constexpr wchar_t kAllTag[] = L"전체";
 
 struct AppState {
     HINSTANCE instance{};
@@ -26,6 +27,7 @@ struct AppState {
     ULONG_PTR gdiplusToken{};
     std::vector<LinkEntry> entries;
     WindowSettings settings;
+    std::wstring activeTag{kAllTag};
     int scrollIndex{};
     bool mouseDown{};
     bool mouseMoved{};
@@ -36,7 +38,9 @@ struct AppState {
     int wheelAccum{};
     enum class PressTarget {
         None,
+        Tag,
         Add,
+        Delete,
         Card,
         Move,
         Resize
@@ -49,6 +53,7 @@ Layout BuildLayout(int width, int height);
 void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
+void RenderWindow(HWND hwnd);
 
 std::wstring CurrentExePath() {
     std::wstring path(MAX_PATH, L'\0');
@@ -126,9 +131,55 @@ bool ContainsExpanded(const RectI& rect, POINT point, int amount) {
     return Expanded(rect, amount).contains(point);
 }
 
+std::wstring NormalizedTag(std::wstring tag) {
+    tag = Sanitized(tag);
+    return tag.empty() ? kAllTag : tag;
+}
+
+std::vector<std::wstring> Tags() {
+    std::vector<std::wstring> tags{kAllTag};
+    for (const auto& entry : g_app.entries) {
+        std::wstring tag = NormalizedTag(entry.tag);
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            tags.push_back(tag);
+        }
+    }
+    return tags;
+}
+
+bool EntryInActiveTag(const LinkEntry& entry) {
+    return g_app.activeTag == kAllTag || NormalizedTag(entry.tag) == g_app.activeTag;
+}
+
+std::vector<size_t> VisibleEntries() {
+    std::vector<size_t> visible;
+    for (size_t i = 0; i < g_app.entries.size(); ++i) {
+        if (EntryInActiveTag(g_app.entries[i])) {
+            visible.push_back(i);
+        }
+    }
+    return visible;
+}
+
+int PositionInVisible(size_t entryIndex) {
+    std::vector<size_t> visible = VisibleEntries();
+    for (size_t i = 0; i < visible.size(); ++i) {
+        if (visible[i] == entryIndex) {
+            return static_cast<int>(i);
+        }
+    }
+    return 0;
+}
+
 AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryIndex) {
+    if (ContainsExpanded(layout.tagButton, point, 8)) {
+        return AppState::PressTarget::Tag;
+    }
     if (ContainsExpanded(layout.addButton, point, 10)) {
         return AppState::PressTarget::Add;
+    }
+    if (ContainsExpanded(layout.deleteButton, point, 10)) {
+        return AppState::PressTarget::Delete;
     }
     if (ContainsExpanded(layout.moveHandle, point, 14)) {
         return AppState::PressTarget::Move;
@@ -147,8 +198,12 @@ AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryI
 
 bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget target, size_t entryIndex) {
     switch (target) {
+    case AppState::PressTarget::Tag:
+        return ContainsExpanded(layout.tagButton, point, 8);
     case AppState::PressTarget::Add:
         return ContainsExpanded(layout.addButton, point, 10);
+    case AppState::PressTarget::Delete:
+        return ContainsExpanded(layout.deleteButton, point, 10);
     case AppState::PressTarget::Move:
         return ContainsExpanded(layout.moveHandle, point, 14);
     case AppState::PressTarget::Resize:
@@ -199,10 +254,9 @@ void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
     int originalHeight = g_app.pressWindow.bottom - g_app.pressWindow.top;
     int minWidth = 280;
     int minHeight = 180;
-    int newWidth = std::max(minWidth, originalWidth - dx);
+    int newWidth = std::max(minWidth, originalWidth + dx);
     int newHeight = std::max(minHeight, originalHeight + dy);
-    int newX = g_app.pressWindow.right - newWidth;
-    SetWindowPos(hwnd, nullptr, newX, g_app.pressWindow.top, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, nullptr, g_app.pressWindow.left, g_app.pressWindow.top, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void DragScrollCards(POINT point) {
@@ -239,6 +293,88 @@ void StartPress(HWND hwnd, POINT point, POINT screenPoint) {
     ApplyCursorForTarget(g_app.pressTarget);
 }
 
+void ShowTagMenu(HWND hwnd) {
+    std::vector<std::wstring> tags = Tags();
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+
+    constexpr UINT baseId = 3000;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        UINT flags = MF_STRING;
+        if (tags[i] == g_app.activeTag) {
+            flags |= MF_CHECKED;
+        }
+        AppendMenuW(menu, flags, baseId + static_cast<UINT>(i), tags[i].c_str());
+    }
+
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+    POINT menuPoint{layout.tagButton.x, layout.tagButton.y + layout.tagButton.h + 4};
+    ClientToScreen(hwnd, &menuPoint);
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, menuPoint.x, menuPoint.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+
+    if (command >= baseId && command < baseId + tags.size()) {
+        g_app.activeTag = tags[command - baseId];
+        g_app.scrollIndex = 0;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
+void DeleteFromDialog(HWND hwnd) {
+    if (g_app.entries.empty()) {
+        return;
+    }
+
+    size_t index = ShowDeleteDialog(g_app.instance, hwnd, g_app.entries, g_app.activeTag);
+    if (index >= g_app.entries.size()) {
+        return;
+    }
+
+    g_app.entries.erase(g_app.entries.begin() + static_cast<std::ptrdiff_t>(index));
+    std::vector<size_t> visible = VisibleEntries();
+    if (visible.empty()) {
+        g_app.scrollIndex = 0;
+    } else {
+        g_app.scrollIndex = std::clamp(g_app.scrollIndex, 0, static_cast<int>(visible.size()) - 1);
+    }
+    SaveLinks(g_app.entries);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void EditEntry(HWND hwnd, size_t index) {
+    if (index >= g_app.entries.size()) {
+        return;
+    }
+
+    VideoDialogInput input;
+    input.editing = true;
+    input.title = g_app.entries[index].title;
+    input.url = g_app.entries[index].url;
+    input.tag = NormalizedTag(g_app.entries[index].tag);
+    AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), input);
+    if (!result.accepted) {
+        return;
+    }
+
+    bool urlChanged = g_app.entries[index].url != result.url;
+    g_app.entries[index].title = result.title.empty() ? L"제목 없음" : result.title;
+    g_app.entries[index].url = result.url;
+    g_app.entries[index].tag = NormalizedTag(result.tag);
+    if (urlChanged) {
+        g_app.entries[index].thumbnail = LoadThumbnail(result.url);
+    }
+    if (!EntryInActiveTag(g_app.entries[index])) {
+        g_app.activeTag = NormalizedTag(g_app.entries[index].tag);
+        g_app.scrollIndex = PositionInVisible(index);
+    }
+    SaveLinks(g_app.entries);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void FinishPress(HWND hwnd, POINT point) {
     if (!g_app.mouseDown) {
         return;
@@ -255,18 +391,26 @@ void FinishPress(HWND hwnd, POINT point) {
     }
 
     switch (g_app.pressTarget) {
+    case AppState::PressTarget::Tag:
+        ShowTagMenu(hwnd);
+        break;
     case AppState::PressTarget::Add: {
-        AddResult result = ShowAddDialog(g_app.instance, hwnd);
+        VideoDialogInput input;
+        input.tag = g_app.activeTag;
+        AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), input);
         if (result.accepted) {
             AddEntry(result);
         }
         break;
     }
+    case AppState::PressTarget::Delete:
+        DeleteFromDialog(hwnd);
+        break;
     case AppState::PressTarget::Card:
-        if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && static_cast<int>(g_app.pressEntryIndex) == g_app.scrollIndex) {
+        if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && PositionInVisible(g_app.pressEntryIndex) == g_app.scrollIndex) {
             OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
         } else if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
-            g_app.scrollIndex = static_cast<int>(g_app.pressEntryIndex);
+            g_app.scrollIndex = PositionInVisible(g_app.pressEntryIndex);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         break;
@@ -285,12 +429,14 @@ void LoadThumbnails() {
 
 Layout BuildLayout(int width, int height) {
     Layout layout;
-    int buttonSize = 42;
-    layout.addButton = {std::max(12, width - buttonSize - 16), 14, buttonSize, buttonSize};
-    layout.moveHandle = {std::max(12, width / 2 - 42), std::max(12, height - 42), 84, 30};
-    layout.resizeHandle = {12, std::max(12, height - 44), 44, 32};
+    layout.tagButton = {12, 14, 100, 28};
+    layout.addButton = {std::max(12, width - 44), 14, 28, 28};
+    layout.deleteButton = {14, std::max(12, height - 38), 28, 28};
+    layout.moveHandle = {std::max(12, width / 2 - 32), std::max(12, height - 36), 64, 24};
+    layout.resizeHandle = {std::max(12, width - 42), std::max(12, height - 38), 30, 28};
 
-    int count = static_cast<int>(g_app.entries.size());
+    std::vector<size_t> visible = VisibleEntries();
+    int count = static_cast<int>(visible.size());
     if (count == 0) {
         layout.visibleSlots = 0;
         return layout;
@@ -322,12 +468,12 @@ Layout BuildLayout(int width, int height) {
     int leftX = centerX - gap - sideWidth;
     int rightX = centerX + centerWidth + gap;
 
-    auto wrapIndex = [count](int index) {
-        return static_cast<size_t>((index % count + count) % count);
+    auto wrapIndex = [&visible, count](int index) {
+        return visible[static_cast<size_t>((index % count + count) % count)];
     };
 
     if (count == 1) {
-        layout.cards.push_back({0, {centerX, centerY, centerWidth, centerHeight}, true});
+        layout.cards.push_back({visible[0], {centerX, centerY, centerWidth, centerHeight}, true});
     } else if (count == 2) {
         layout.cards.push_back({wrapIndex(g_app.scrollIndex + 1), {rightX, sideY, sideWidth, sideHeight}, false});
         layout.cards.push_back({wrapIndex(g_app.scrollIndex), {centerX, centerY, centerWidth, centerHeight}, true});
@@ -381,54 +527,76 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
 }
 
 void DrawAddButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(255, 110, 126, 150));
+    SolidBrush brush(Color(155, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(255, 0, 0, 0), 4.0f);
+    Pen pen(Color(220, 0, 0, 0), 3.0f);
     float cx = static_cast<float>(rect.x + rect.w / 2);
     float cy = static_cast<float>(rect.y + rect.h / 2);
-    graphics.DrawLine(&pen, cx - 13.0f, cy, cx + 13.0f, cy);
-    graphics.DrawLine(&pen, cx, cy - 13.0f, cx, cy + 13.0f);
+    graphics.DrawLine(&pen, cx - 8.0f, cy, cx + 8.0f, cy);
+    graphics.DrawLine(&pen, cx, cy - 8.0f, cx, cy + 8.0f);
+}
+
+void DrawTagButton(Graphics& graphics, const RectI& rect) {
+    SolidBrush brush(Color(155, 110, 126, 150));
+    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
+    DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(230, 0, 0, 0), StringAlignmentCenter);
+}
+
+void DrawDeleteButton(Graphics& graphics, const RectI& rect) {
+    SolidBrush brush(Color(155, 110, 126, 150));
+    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
+    Pen pen(Color(220, 0, 0, 0), 3.0f);
+    graphics.DrawLine(&pen, rect.x + 8, rect.y + 8, rect.x + rect.w - 8, rect.y + rect.h - 8);
+    graphics.DrawLine(&pen, rect.x + rect.w - 8, rect.y + 8, rect.x + 8, rect.y + rect.h - 8);
 }
 
 void DrawMoveHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(255, 110, 126, 150));
+    SolidBrush brush(Color(155, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(255, 0, 0, 0), 4.0f);
+    Pen pen(Color(220, 0, 0, 0), 3.0f);
     float centerX = static_cast<float>(rect.x + rect.w / 2);
     float centerY = static_cast<float>(rect.y + rect.h / 2);
-    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX + 18.0f, centerY);
-    graphics.DrawLine(&pen, centerX, centerY - 9.0f, centerX, centerY + 9.0f);
-    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX - 10.0f, centerY - 7.0f);
-    graphics.DrawLine(&pen, centerX - 18.0f, centerY, centerX - 10.0f, centerY + 7.0f);
-    graphics.DrawLine(&pen, centerX + 18.0f, centerY, centerX + 10.0f, centerY - 7.0f);
-    graphics.DrawLine(&pen, centerX + 18.0f, centerY, centerX + 10.0f, centerY + 7.0f);
+    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX + 14.0f, centerY);
+    graphics.DrawLine(&pen, centerX, centerY - 7.0f, centerX, centerY + 7.0f);
+    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX - 8.0f, centerY - 5.0f);
+    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX - 8.0f, centerY + 5.0f);
+    graphics.DrawLine(&pen, centerX + 14.0f, centerY, centerX + 8.0f, centerY - 5.0f);
+    graphics.DrawLine(&pen, centerX + 14.0f, centerY, centerX + 8.0f, centerY + 5.0f);
 }
 
 void DrawResizeHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(255, 110, 126, 150));
+    SolidBrush brush(Color(155, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(255, 0, 0, 0), 3.0f);
-    int left = rect.x + 8;
+    Pen pen(Color(220, 0, 0, 0), 3.0f);
+    int right = rect.x + rect.w - 7;
     int bottom = rect.y + rect.h - 7;
-    graphics.DrawLine(&pen, left, bottom, left + 21, bottom - 21);
-    graphics.DrawLine(&pen, left + 10, bottom, left + 21, bottom - 11);
-    graphics.DrawLine(&pen, left, bottom - 10, left + 11, bottom - 21);
+    graphics.DrawLine(&pen, right - 18, bottom, right, bottom - 18);
+    graphics.DrawLine(&pen, right - 9, bottom, right, bottom - 9);
 }
 
-void PaintWindow(HWND hwnd) {
-    PAINTSTRUCT ps{};
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    int width = client.right - client.left;
-    int height = client.bottom - client.top;
+void RenderWindow(HWND hwnd) {
+    RECT window{};
+    GetWindowRect(hwnd, &window);
+    int width = window.right - window.left;
+    int height = window.bottom - window.top;
     if (width <= 0 || height <= 0) {
-        EndPaint(hwnd, &ps);
         return;
     }
 
-    HDC memoryDc = CreateCompatibleDC(hdc);
-    HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) {
+        return;
+    }
+    HDC memoryDc = CreateCompatibleDC(screenDc);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(screenDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (!memoryDc || !bitmap) {
         if (bitmap) {
             DeleteObject(bitmap);
@@ -436,17 +604,16 @@ void PaintWindow(HWND hwnd) {
         if (memoryDc) {
             DeleteDC(memoryDc);
         }
-        EndPaint(hwnd, &ps);
+        ReleaseDC(nullptr, screenDc);
         return;
     }
     HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
-    HBRUSH clearBrush = CreateSolidBrush(kTransparentColor);
-    RECT bufferRect{0, 0, width, height};
-    FillRect(memoryDc, &bufferRect, clearBrush);
-    DeleteObject(clearBrush);
 
     {
         Graphics graphics(memoryDc);
+        graphics.SetCompositingMode(CompositingModeSourceCopy);
+        graphics.Clear(Color(0, 0, 0, 0));
+        graphics.SetCompositingMode(CompositingModeSourceOver);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
@@ -455,26 +622,39 @@ void PaintWindow(HWND hwnd) {
         for (const auto& card : layout.cards) {
             DrawCard(graphics, card, g_app.entries[card.entryIndex]);
         }
+        DrawTagButton(graphics, layout.tagButton);
         DrawAddButton(graphics, layout.addButton);
+        DrawDeleteButton(graphics, layout.deleteButton);
         DrawMoveHandle(graphics, layout.moveHandle);
         DrawResizeHandle(graphics, layout.resizeHandle);
         graphics.Flush(FlushIntentionFlush);
     }
 
-    BitBlt(hdc, 0, 0, width, height, memoryDc, 0, 0, SRCCOPY);
+    POINT destination{window.left, window.top};
+    POINT source{0, 0};
+    SIZE size{width, height};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(hwnd, screenDc, &destination, &size, memoryDc, &source, 0, &blend, ULW_ALPHA);
+
     SelectObject(memoryDc, oldBitmap);
     DeleteObject(bitmap);
     DeleteDC(memoryDc);
-    EndPaint(hwnd, &ps);
+    ReleaseDC(nullptr, screenDc);
+    ValidateRect(hwnd, nullptr);
 }
 
 void AddEntry(const AddResult& result) {
     LinkEntry entry;
     entry.title = result.title.empty() ? L"제목 없음" : result.title;
     entry.url = result.url;
+    entry.tag = NormalizedTag(result.tag);
     entry.thumbnail = LoadThumbnail(entry.url);
     g_app.entries.push_back(std::move(entry));
-    g_app.scrollIndex = static_cast<int>(g_app.entries.size()) - 1;
+    g_app.activeTag = NormalizedTag(g_app.entries.back().tag);
+    g_app.scrollIndex = PositionInVisible(g_app.entries.size() - 1);
     SaveLinks(g_app.entries);
     InvalidateRect(g_app.window, nullptr, FALSE);
 }
@@ -484,7 +664,7 @@ void OpenUrl(const std::wstring& url) {
 }
 
 void ScrollBy(int delta) {
-    int count = static_cast<int>(g_app.entries.size());
+    int count = static_cast<int>(VisibleEntries().size());
     if (count <= 1) {
         return;
     }
@@ -501,7 +681,6 @@ void ScrollBy(int delta) {
 LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
-        SetLayeredWindowAttributes(hwnd, kTransparentColor, 255, LWA_COLORKEY);
         return 0;
     case WM_ERASEBKGND:
         return 1;
@@ -556,6 +735,19 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         FinishPress(hwnd, point);
         return 0;
     }
+    case WM_RBUTTONUP: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+        for (const auto& card : layout.cards) {
+            if (ContainsExpanded(card.rect, point, 8)) {
+                EditEntry(hwnd, card.entryIndex);
+                return 0;
+            }
+        }
+        return 0;
+    }
     case WM_CAPTURECHANGED:
         if (g_app.mouseDown && reinterpret_cast<HWND>(lParam) != hwnd) {
             g_app.mouseDown = false;
@@ -607,7 +799,15 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_PAINT:
-        PaintWindow(hwnd);
+    {
+        PAINTSTRUCT paint{};
+        BeginPaint(hwnd, &paint);
+        EndPaint(hwnd, &paint);
+        RenderWindow(hwnd);
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
         SaveLinks(g_app.entries);
@@ -657,7 +857,7 @@ int RunApp(HINSTANCE instance, int showCommand) {
         g_app.settings = DefaultWindowSettings();
     }
 
-    g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, kMainClassName, L"BlackFix VideoShuffle", WS_POPUP, g_app.settings.x, g_app.settings.y, g_app.settings.width, g_app.settings.height, nullptr, nullptr, instance, nullptr);
+    g_app.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, kMainClassName, L"BlackFix VideoShuffle", WS_POPUP, g_app.settings.x, g_app.settings.y, g_app.settings.width, g_app.settings.height, nullptr, nullptr, instance, nullptr);
     if (!g_app.window) {
         g_app.entries.clear();
         GdiplusShutdown(g_app.gdiplusToken);

@@ -42,13 +42,23 @@ std::vector<LinkEntry> LoadLinks() {
     std::ifstream file(LinksPath(), std::ios::binary);
     std::string line;
     while (std::getline(file, line)) {
-        size_t tab = line.find('\t');
-        if (tab == std::string::npos) {
+        size_t first = line.find('\t');
+        if (first == std::string::npos) {
             continue;
         }
+        size_t second = line.find('\t', first + 1);
         LinkEntry entry;
-        entry.title = Sanitized(FromUtf8(std::string_view(line.data(), tab)));
-        entry.url = Sanitized(FromUtf8(std::string_view(line.data() + tab + 1, line.size() - tab - 1)));
+        entry.title = Sanitized(FromUtf8(std::string_view(line.data(), first)));
+        if (second == std::string::npos) {
+            entry.url = Sanitized(FromUtf8(std::string_view(line.data() + first + 1, line.size() - first - 1)));
+            entry.tag = L"전체";
+        } else {
+            entry.url = Sanitized(FromUtf8(std::string_view(line.data() + first + 1, second - first - 1)));
+            entry.tag = Sanitized(FromUtf8(std::string_view(line.data() + second + 1, line.size() - second - 1)));
+            if (entry.tag.empty()) {
+                entry.tag = L"전체";
+            }
+        }
         if (!entry.url.empty()) {
             entries.push_back(std::move(entry));
         }
@@ -59,7 +69,7 @@ std::vector<LinkEntry> LoadLinks() {
 void SaveLinks(const std::vector<LinkEntry>& entries) {
     std::ofstream file(LinksPath(), std::ios::binary | std::ios::trunc);
     for (const auto& entry : entries) {
-        file << ToUtf8(Sanitized(entry.title)) << '\t' << ToUtf8(Sanitized(entry.url)) << '\n';
+        file << ToUtf8(Sanitized(entry.title)) << '\t' << ToUtf8(Sanitized(entry.url)) << '\t' << ToUtf8(Sanitized(entry.tag.empty() ? L"전체" : entry.tag)) << '\n';
     }
 }
 

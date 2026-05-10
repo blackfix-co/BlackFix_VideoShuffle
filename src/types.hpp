@@ -31,6 +31,7 @@ struct WindowSettings {
 struct LinkEntry {
     std::wstring title;
     std::wstring url;
+    std::wstring tag{L"전체"};
     std::unique_ptr<Gdiplus::Bitmap> thumbnail;
 };
 
@@ -41,9 +42,11 @@ struct CardLayout {
 };
 
 struct Layout {
+    RectI tagButton;
     RectI addButton;
     RectI moveHandle;
     RectI resizeHandle;
+    RectI deleteButton;
     int visibleSlots{};
     std::vector<CardLayout> cards;
 };
