@@ -7,6 +7,7 @@ add_executable(BlackFix_VideoShuffle WIN32
     src/app.cpp
     src/delete_dialog.cpp
     src/http.cpp
+    src/link_title.cpp
     src/main.cpp
     src/storage.cpp
     src/thumbnail.cpp

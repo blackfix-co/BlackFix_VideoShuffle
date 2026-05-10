@@ -2,6 +2,7 @@
 
 #include "add_dialog.hpp"
 #include "delete_dialog.hpp"
+#include "link_title.hpp"
 #include "storage.hpp"
 #include "thumbnail.hpp"
 #include "updater.hpp"
@@ -58,6 +59,7 @@ Layout BuildLayout(int width, int height);
 void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
+std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url);
 void RenderWindow(HWND hwnd);
 void RequestRender(HWND hwnd);
 
@@ -459,7 +461,7 @@ void EditEntry(HWND hwnd, size_t index) {
     }
 
     bool urlChanged = g_app.entries[index].url != result.url;
-    g_app.entries[index].title = result.title.empty() ? L"제목 없음" : result.title;
+    g_app.entries[index].title = ResolveTitle(result.title, result.url);
     g_app.entries[index].url = result.url;
     g_app.entries[index].tag = NormalizedTag(result.tag);
     if (urlChanged) {
@@ -522,6 +524,31 @@ void FinishPress(HWND hwnd, POINT point) {
 void LoadThumbnails() {
     for (auto& entry : g_app.entries) {
         entry.thumbnail = LoadThumbnail(entry.url);
+    }
+}
+
+std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url) {
+    std::wstring cleanTitle = Sanitized(title);
+    if (!cleanTitle.empty() && cleanTitle != L"제목 없음") {
+        return cleanTitle;
+    }
+    std::wstring linkTitle = LoadLinkTitle(url);
+    return linkTitle.empty() ? L"제목 없음" : linkTitle;
+}
+
+void ResolveMissingTitles() {
+    bool changed = false;
+    for (auto& entry : g_app.entries) {
+        if (entry.title.empty() || entry.title == L"제목 없음") {
+            std::wstring title = ResolveTitle(entry.title, entry.url);
+            if (title != entry.title) {
+                entry.title = title;
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        SaveLinks(g_app.entries);
     }
 }
 
@@ -617,6 +644,67 @@ void DrawText(Graphics& graphics, const std::wstring& text, RectF bounds, float 
     graphics.DrawString(text.c_str(), -1, &font, bounds, &format, &brush);
 }
 
+bool TextFits(Graphics& graphics, const std::wstring& text, RectF bounds, float fontSize, StringFormat& format) {
+    Font font(L"Malgun Gothic", fontSize, FontStyleRegular, UnitPixel);
+    RectF measured;
+    graphics.MeasureString(text.c_str(), -1, &font, bounds, &format, &measured);
+    return measured.Width <= bounds.Width + 2.0f && measured.Height <= bounds.Height + 2.0f;
+}
+
+float FitTextSize(Graphics& graphics, const std::wstring& text, RectF bounds, float preferredSize, float minimumSize, StringFormat& format) {
+    for (float size = preferredSize; size >= minimumSize; size -= 0.5f) {
+        if (TextFits(graphics, text, bounds, size, format)) {
+            return size;
+        }
+    }
+    return minimumSize;
+}
+
+struct TitleLayout {
+    RectI bar;
+    RectF textBounds;
+    float fontSize{};
+};
+
+TitleLayout BuildTitleLayout(Graphics& graphics, const RectI& rect, const std::wstring& title, bool active) {
+    int baseHeight = std::clamp(rect.h / 6, 34, 72);
+    int maxHeight = std::clamp(rect.h * 3 / 4, baseHeight, std::max(baseHeight, rect.h - 8));
+    int horizontalPadding = std::clamp(rect.w / 14, 8, 22);
+    float preferredSize = std::clamp(static_cast<float>(baseHeight) * (active ? 0.42f : 0.38f), 12.0f, 26.0f);
+    float minimumSize = std::clamp(static_cast<float>(rect.w) / 18.0f, 6.0f, 10.0f);
+
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetTrimming(StringTrimmingNone);
+
+    int fittedHeight = baseHeight;
+    for (int height = baseHeight; height <= maxHeight; height += 4) {
+        int verticalPadding = std::clamp(height / 9, 3, 10);
+        RectF bounds(static_cast<float>(rect.x + horizontalPadding), static_cast<float>(rect.y + rect.h - height + verticalPadding), static_cast<float>(std::max(1, rect.w - horizontalPadding * 2)), static_cast<float>(std::max(1, height - verticalPadding * 2)));
+        if (TextFits(graphics, title, bounds, preferredSize, format)) {
+            fittedHeight = height;
+            return {{rect.x, rect.y + rect.h - fittedHeight, rect.w, fittedHeight}, bounds, preferredSize};
+        }
+        fittedHeight = height;
+    }
+
+    int verticalPadding = std::clamp(fittedHeight / 9, 3, 10);
+    RectF bounds(static_cast<float>(rect.x + horizontalPadding), static_cast<float>(rect.y + rect.h - fittedHeight + verticalPadding), static_cast<float>(std::max(1, rect.w - horizontalPadding * 2)), static_cast<float>(std::max(1, fittedHeight - verticalPadding * 2)));
+    float fontSize = FitTextSize(graphics, title, bounds, preferredSize, minimumSize, format);
+    return {{rect.x, rect.y + rect.h - fittedHeight, rect.w, fittedHeight}, bounds, fontSize};
+}
+
+void DrawTitleText(Graphics& graphics, const std::wstring& title, const TitleLayout& layout) {
+    Font font(L"Malgun Gothic", layout.fontSize, FontStyleRegular, UnitPixel);
+    SolidBrush brush(Color(255, 245, 248, 252));
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetTrimming(StringTrimmingNone);
+    graphics.DrawString(title.c_str(), -1, &font, layout.textBounds, &format, &brush);
+}
+
 void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry) {
     const RectI& rect = card.rect;
     SolidBrush fallback(card.active ? Color(255, 128, 128, 128) : Color(255, 112, 112, 112));
@@ -635,16 +723,11 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
         graphics.ResetClip();
     }
 
-    int titleHeight = std::clamp(rect.h / 6, 34, 72);
-    int horizontalPadding = std::clamp(rect.w / 14, 8, 22);
-    int verticalPadding = std::clamp(titleHeight / 7, 4, 10);
-    RectI titleBar{rect.x, rect.y + rect.h - titleHeight, rect.w, titleHeight};
-    SolidBrush titleBrush(card.active ? Color(255, 92, 109, 132) : Color(255, 84, 95, 112));
-    graphics.FillRectangle(&titleBrush, titleBar.x, titleBar.y, titleBar.w, titleBar.h);
     std::wstring title = entry.title.empty() ? L"제목 없음" : entry.title;
-    float fontScale = card.active ? 0.42f : 0.38f;
-    float fontSize = std::clamp(static_cast<float>(titleHeight) * fontScale, 12.0f, 26.0f);
-    DrawText(graphics, title, RectF(static_cast<float>(titleBar.x + horizontalPadding), static_cast<float>(titleBar.y + verticalPadding), static_cast<float>(std::max(1, titleBar.w - horizontalPadding * 2)), static_cast<float>(std::max(1, titleBar.h - verticalPadding * 2))), fontSize, Color(255, 245, 248, 252), StringAlignmentCenter);
+    TitleLayout titleLayout = BuildTitleLayout(graphics, rect, title, card.active);
+    SolidBrush titleBrush(card.active ? Color(255, 92, 109, 132) : Color(255, 84, 95, 112));
+    graphics.FillRectangle(&titleBrush, titleLayout.bar.x, titleLayout.bar.y, titleLayout.bar.w, titleLayout.bar.h);
+    DrawTitleText(graphics, title, titleLayout);
 }
 
 void DrawAddButton(Graphics& graphics, const RectI& rect) {
@@ -790,7 +873,7 @@ void RequestRender(HWND hwnd) {
 
 void AddEntry(const AddResult& result) {
     LinkEntry entry;
-    entry.title = result.title.empty() ? L"제목 없음" : result.title;
+    entry.title = ResolveTitle(result.title, result.url);
     entry.url = result.url;
     entry.tag = NormalizedTag(result.tag);
     entry.thumbnail = LoadThumbnail(entry.url);
@@ -993,6 +1076,7 @@ int RunApp(HINSTANCE instance, int showCommand) {
     CreateDesktopShortcut();
 
     g_app.entries = LoadLinks();
+    ResolveMissingTitles();
     LoadThumbnails();
 
     g_app.settings = LoadWindowSettings();

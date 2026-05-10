@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
+
 namespace {
 
 struct HttpHandle {
@@ -23,7 +25,7 @@ struct HttpHandle {
 
 }
 
-std::vector<unsigned char> DownloadBytes(const std::wstring& url) {
+std::vector<unsigned char> DownloadBytes(const std::wstring& url, size_t maxBytes) {
     URL_COMPONENTS components{};
     components.dwStructSize = sizeof(components);
     components.dwSchemeLength = static_cast<DWORD>(-1);
@@ -81,13 +83,18 @@ std::vector<unsigned char> DownloadBytes(const std::wstring& url) {
         if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
             break;
         }
+        size_t remaining = maxBytes == 0 ? available : maxBytes - bytes.size();
+        DWORD target = static_cast<DWORD>(std::min<size_t>(available, remaining));
         size_t offset = bytes.size();
-        bytes.resize(offset + available);
+        bytes.resize(offset + target);
         DWORD read = 0;
-        if (!WinHttpReadData(request, bytes.data() + offset, available, &read)) {
+        if (!WinHttpReadData(request, bytes.data() + offset, target, &read)) {
             return {};
         }
         bytes.resize(offset + read);
+        if (maxBytes > 0 && bytes.size() >= maxBytes) {
+            break;
+        }
     }
     return bytes;
 }
