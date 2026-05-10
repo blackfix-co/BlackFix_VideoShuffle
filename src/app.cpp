@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 using namespace Gdiplus;
 
@@ -25,9 +26,29 @@ struct AppState {
     std::vector<LinkEntry> entries;
     WindowSettings settings;
     int scrollIndex{};
+    bool mouseDown{};
+    bool mouseMoved{};
+    POINT pressClient{};
+    POINT pressScreen{};
+    RECT pressWindow{};
+    size_t pressEntryIndex{};
+    int wheelAccum{};
+    enum class PressTarget {
+        None,
+        Add,
+        Left,
+        Right,
+        Card,
+        Move
+    } pressTarget{PressTarget::None};
 };
 
 AppState g_app;
+
+Layout BuildLayout(int width, int height);
+void ScrollBy(int delta);
+void AddEntry(const AddResult& result);
+void OpenUrl(const std::wstring& url);
 
 std::wstring CurrentExePath() {
     std::wstring path(MAX_PATH, L'\0');
@@ -64,20 +85,178 @@ WindowSettings DefaultWindowSettings() {
     return settings;
 }
 
-void SaveCurrentWindowSettings(HWND hwnd) {
+WindowSettings CurrentWindowSettings(HWND hwnd) {
+    WindowSettings settings;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
-        return;
+        return settings;
     }
     RECT rect{};
     GetWindowRect(hwnd, &rect);
-    WindowSettings settings;
     settings.x = rect.left;
     settings.y = rect.top;
     settings.width = rect.right - rect.left;
     settings.height = rect.bottom - rect.top;
     settings.valid = true;
-    g_app.settings = settings;
-    SaveWindowSettings(settings);
+    return settings;
+}
+
+void RememberCurrentWindowSettings(HWND hwnd) {
+    WindowSettings settings = CurrentWindowSettings(hwnd);
+    if (settings.valid) {
+        g_app.settings = settings;
+    }
+}
+
+void SaveCurrentWindowSettings(HWND hwnd) {
+    RememberCurrentWindowSettings(hwnd);
+    if (g_app.settings.valid) {
+        SaveWindowSettings(g_app.settings);
+    }
+}
+
+RectI Expanded(RectI rect, int amount) {
+    rect.x -= amount;
+    rect.y -= amount;
+    rect.w += amount * 2;
+    rect.h += amount * 2;
+    return rect;
+}
+
+bool ContainsExpanded(const RectI& rect, POINT point, int amount) {
+    return Expanded(rect, amount).contains(point);
+}
+
+AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryIndex) {
+    if (ContainsExpanded(layout.addButton, point, 10)) {
+        return AppState::PressTarget::Add;
+    }
+    if (layout.showLeft && ContainsExpanded(layout.leftButton, point, 16)) {
+        return AppState::PressTarget::Left;
+    }
+    if (layout.showRight && ContainsExpanded(layout.rightButton, point, 16)) {
+        return AppState::PressTarget::Right;
+    }
+    for (const auto& card : layout.cards) {
+        if (ContainsExpanded(card.rect, point, 8)) {
+            entryIndex = card.entryIndex;
+            return AppState::PressTarget::Card;
+        }
+    }
+    return AppState::PressTarget::Move;
+}
+
+bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget target, size_t entryIndex) {
+    switch (target) {
+    case AppState::PressTarget::Add:
+        return ContainsExpanded(layout.addButton, point, 10);
+    case AppState::PressTarget::Left:
+        return layout.showLeft && ContainsExpanded(layout.leftButton, point, 16);
+    case AppState::PressTarget::Right:
+        return layout.showRight && ContainsExpanded(layout.rightButton, point, 16);
+    case AppState::PressTarget::Card:
+        for (const auto& card : layout.cards) {
+            if (card.entryIndex == entryIndex && ContainsExpanded(card.rect, point, 8)) {
+                return true;
+            }
+        }
+        return false;
+    default:
+        return true;
+    }
+}
+
+void ApplyCursorForTarget(AppState::PressTarget target) {
+    if (target == AppState::PressTarget::Move) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    } else {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+    }
+}
+
+void MoveWindowFromDrag(HWND hwnd, POINT screenPoint) {
+    int dx = screenPoint.x - g_app.pressScreen.x;
+    int dy = screenPoint.y - g_app.pressScreen.y;
+    if (std::abs(dx) > 2 || std::abs(dy) > 2) {
+        g_app.mouseMoved = true;
+    }
+    int width = g_app.pressWindow.right - g_app.pressWindow.left;
+    int height = g_app.pressWindow.bottom - g_app.pressWindow.top;
+    SetWindowPos(hwnd, nullptr, g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void DragScrollCards(POINT point) {
+    int dx = point.x - g_app.pressClient.x;
+    int dy = point.y - g_app.pressClient.y;
+    if (std::abs(dx) < 42 || std::abs(dx) < std::abs(dy)) {
+        return;
+    }
+    ScrollBy(dx < 0 ? 1 : -1);
+    g_app.mouseMoved = true;
+    g_app.pressClient = point;
+}
+
+void UpdateCursor(HWND hwnd, POINT point) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+    size_t entryIndex = 0;
+    ApplyCursorForTarget(TargetAt(layout, point, entryIndex));
+}
+
+void StartPress(HWND hwnd, POINT point, POINT screenPoint) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+    g_app.mouseDown = true;
+    g_app.mouseMoved = false;
+    g_app.pressClient = point;
+    g_app.pressScreen = screenPoint;
+    g_app.pressEntryIndex = 0;
+    g_app.pressTarget = TargetAt(layout, point, g_app.pressEntryIndex);
+    GetWindowRect(hwnd, &g_app.pressWindow);
+    SetCapture(hwnd);
+    ApplyCursorForTarget(g_app.pressTarget);
+}
+
+void FinishPress(HWND hwnd, POINT point) {
+    if (!g_app.mouseDown) {
+        return;
+    }
+    g_app.mouseDown = false;
+
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+    if (!TargetStillActive(layout, point, g_app.pressTarget, g_app.pressEntryIndex)) {
+        g_app.pressTarget = AppState::PressTarget::None;
+        ReleaseCapture();
+        return;
+    }
+
+    switch (g_app.pressTarget) {
+    case AppState::PressTarget::Add: {
+        AddResult result = ShowAddDialog(g_app.instance, hwnd);
+        if (result.accepted) {
+            AddEntry(result);
+        }
+        break;
+    }
+    case AppState::PressTarget::Left:
+        ScrollBy(-std::max(1, layout.visibleSlots));
+        break;
+    case AppState::PressTarget::Right:
+        ScrollBy(std::max(1, layout.visibleSlots));
+        break;
+    case AppState::PressTarget::Card:
+        if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
+            OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
+        }
+        break;
+    default:
+        break;
+    }
+    g_app.pressTarget = AppState::PressTarget::None;
+    ReleaseCapture();
 }
 
 void LoadThumbnails() {
@@ -211,9 +390,10 @@ void DrawArrowButton(Graphics& graphics, const RectI& rect, bool right) {
 }
 
 void DrawResizeGrip(Graphics& graphics, int width, int height) {
-    Pen pen(Color(255, 70, 80, 96), 2.0f);
-    graphics.DrawLine(&pen, width - 18, height - 6, width - 6, height - 18);
-    graphics.DrawLine(&pen, width - 12, height - 6, width - 6, height - 12);
+    Pen pen(Color(255, 70, 80, 96), 3.0f);
+    graphics.DrawLine(&pen, width - 28, height - 7, width - 7, height - 28);
+    graphics.DrawLine(&pen, width - 20, height - 7, width - 7, height - 20);
+    graphics.DrawLine(&pen, width - 12, height - 7, width - 7, height - 12);
 }
 
 void PaintWindow(HWND hwnd) {
@@ -221,41 +401,57 @@ void PaintWindow(HWND hwnd) {
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT client{};
     GetClientRect(hwnd, &client);
-    HBRUSH clearBrush = CreateSolidBrush(kTransparentColor);
-    FillRect(hdc, &client, clearBrush);
-    DeleteObject(clearBrush);
-
-    Graphics graphics(hdc);
-    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-    graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-
     int width = client.right - client.left;
     int height = client.bottom - client.top;
-    Layout layout = BuildLayout(width, height);
-    for (const auto& card : layout.cards) {
-        DrawCard(graphics, card.rect, g_app.entries[card.entryIndex]);
+    if (width <= 0 || height <= 0) {
+        EndPaint(hwnd, &ps);
+        return;
     }
-    if (layout.showLeft) {
-        DrawArrowButton(graphics, layout.leftButton, false);
-    }
-    if (layout.showRight) {
-        DrawArrowButton(graphics, layout.rightButton, true);
-    }
-    DrawAddButton(graphics, layout.addButton);
-    DrawResizeGrip(graphics, width, height);
 
-    EndPaint(hwnd, &ps);
-}
-
-bool HitCard(const Layout& layout, POINT point, size_t& entryIndex) {
-    for (const auto& card : layout.cards) {
-        if (card.rect.contains(point)) {
-            entryIndex = card.entryIndex;
-            return true;
+    HDC memoryDc = CreateCompatibleDC(hdc);
+    HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
+    if (!memoryDc || !bitmap) {
+        if (bitmap) {
+            DeleteObject(bitmap);
         }
+        if (memoryDc) {
+            DeleteDC(memoryDc);
+        }
+        EndPaint(hwnd, &ps);
+        return;
     }
-    return false;
+    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+    HBRUSH clearBrush = CreateSolidBrush(kTransparentColor);
+    RECT bufferRect{0, 0, width, height};
+    FillRect(memoryDc, &bufferRect, clearBrush);
+    DeleteObject(clearBrush);
+
+    {
+        Graphics graphics(memoryDc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+        Layout layout = BuildLayout(width, height);
+        for (const auto& card : layout.cards) {
+            DrawCard(graphics, card.rect, g_app.entries[card.entryIndex]);
+        }
+        if (layout.showLeft) {
+            DrawArrowButton(graphics, layout.leftButton, false);
+        }
+        if (layout.showRight) {
+            DrawArrowButton(graphics, layout.rightButton, true);
+        }
+        DrawAddButton(graphics, layout.addButton);
+        DrawResizeGrip(graphics, width, height);
+        graphics.Flush(FlushIntentionFlush);
+    }
+
+    BitBlt(hdc, 0, 0, width, height, memoryDc, 0, 0, SRCCOPY);
+    SelectObject(memoryDc, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memoryDc);
+    EndPaint(hwnd, &ps);
 }
 
 int HitResizeEdge(HWND hwnd, POINT point) {
@@ -263,7 +459,7 @@ int HitResizeEdge(HWND hwnd, POINT point) {
     GetClientRect(hwnd, &client);
     int width = client.right - client.left;
     int height = client.bottom - client.top;
-    int edge = 8;
+    int edge = 18;
     bool left = point.x < edge;
     bool right = point.x >= width - edge;
     bool top = point.y < edge;
@@ -335,6 +531,14 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
         SetLayeredWindowAttributes(hwnd, kTransparentColor, 255, LWA_COLORKEY);
         return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCAPTION) {
+            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+            return TRUE;
+        }
+        break;
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
         info->ptMinTrackSize.x = 280;
@@ -353,40 +557,68 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         GetClientRect(hwnd, &client);
         Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
         size_t entryIndex = 0;
-        if (layout.addButton.contains(point) || layout.leftButton.contains(point) || layout.rightButton.contains(point) || HitCard(layout, point, entryIndex)) {
-            return HTCLIENT;
-        }
-        return HTCAPTION;
+        return TargetAt(layout, point, entryIndex) == AppState::PressTarget::Move ? HTCAPTION : HTCLIENT;
     }
-    case WM_LBUTTONUP: {
+    case WM_LBUTTONDOWN: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        RECT client{};
-        GetClientRect(hwnd, &client);
-        Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
-        if (layout.addButton.contains(point)) {
-            AddResult result = ShowAddDialog(g_app.instance, hwnd);
-            if (result.accepted) {
-                AddEntry(result);
+        POINT screenPoint = point;
+        ClientToScreen(hwnd, &screenPoint);
+        StartPress(hwnd, point, screenPoint);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (g_app.mouseDown) {
+            POINT screenPoint = point;
+            ClientToScreen(hwnd, &screenPoint);
+            if (g_app.pressTarget == AppState::PressTarget::Move) {
+                MoveWindowFromDrag(hwnd, screenPoint);
+            } else if (g_app.pressTarget == AppState::PressTarget::Card) {
+                DragScrollCards(point);
             }
-            return 0;
-        }
-        if (layout.showLeft && layout.leftButton.contains(point)) {
-            ScrollBy(-layout.visibleSlots);
-            return 0;
-        }
-        if (layout.showRight && layout.rightButton.contains(point)) {
-            ScrollBy(layout.visibleSlots);
-            return 0;
-        }
-        size_t entryIndex = 0;
-        if (HitCard(layout, point, entryIndex)) {
-            OpenUrl(g_app.entries[entryIndex].url);
-            return 0;
+        } else {
+            UpdateCursor(hwnd, point);
         }
         return 0;
     }
+    case WM_LBUTTONUP: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        FinishPress(hwnd, point);
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        if (g_app.mouseDown && reinterpret_cast<HWND>(lParam) != hwnd) {
+            g_app.mouseDown = false;
+            g_app.pressTarget = AppState::PressTarget::None;
+        }
+        return 0;
     case WM_MOUSEWHEEL:
-        ScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
+        g_app.wheelAccum += GET_WHEEL_DELTA_WPARAM(wParam);
+        while (g_app.wheelAccum >= WHEEL_DELTA) {
+            ScrollBy(-1);
+            g_app.wheelAccum -= WHEEL_DELTA;
+        }
+        while (g_app.wheelAccum <= -WHEEL_DELTA) {
+            ScrollBy(1);
+            g_app.wheelAccum += WHEEL_DELTA;
+        }
+        return 0;
+    case WM_MOUSEHWHEEL:
+        g_app.wheelAccum += GET_WHEEL_DELTA_WPARAM(wParam);
+        while (g_app.wheelAccum >= WHEEL_DELTA) {
+            ScrollBy(1);
+            g_app.wheelAccum -= WHEEL_DELTA;
+        }
+        while (g_app.wheelAccum <= -WHEEL_DELTA) {
+            ScrollBy(-1);
+            g_app.wheelAccum += WHEEL_DELTA;
+        }
+        return 0;
+    case WM_SIZE:
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_EXITSIZEMOVE:
+        SaveCurrentWindowSettings(hwnd);
         return 0;
     case WM_KEYDOWN:
         if (wParam == VK_LEFT) {
@@ -399,8 +631,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_WINDOWPOSCHANGED:
-        SaveCurrentWindowSettings(hwnd);
-        InvalidateRect(hwnd, nullptr, FALSE);
+        RememberCurrentWindowSettings(hwnd);
+        if ((reinterpret_cast<WINDOWPOS*>(lParam)->flags & SWP_NOSIZE) == 0) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         break;
     case WM_PAINT:
         PaintWindow(hwnd);
