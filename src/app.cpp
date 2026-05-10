@@ -12,6 +12,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
 
 using namespace Gdiplus;
@@ -31,6 +32,7 @@ struct AppState {
     int scrollIndex{};
     bool mouseDown{};
     bool mouseMoved{};
+    bool rendering{};
     POINT pressClient{};
     POINT pressScreen{};
     RECT pressWindow{};
@@ -54,6 +56,7 @@ void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
 void RenderWindow(HWND hwnd);
+void RequestRender(HWND hwnd);
 
 std::wstring CurrentExePath() {
     std::wstring path(MAX_PATH, L'\0');
@@ -241,6 +244,7 @@ void MoveWindowFromDrag(HWND hwnd, POINT screenPoint) {
     int width = g_app.pressWindow.right - g_app.pressWindow.left;
     int height = g_app.pressWindow.bottom - g_app.pressWindow.top;
     SetWindowPos(hwnd, nullptr, g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RequestRender(hwnd);
 }
 
 void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
@@ -257,6 +261,7 @@ void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
     int newWidth = std::max(minWidth, originalWidth + dx);
     int newHeight = std::max(minHeight, originalHeight + dy);
     SetWindowPos(hwnd, nullptr, g_app.pressWindow.left, g_app.pressWindow.top, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    RequestRender(hwnd);
 }
 
 void DragScrollCards(POINT point) {
@@ -320,7 +325,7 @@ void ShowTagMenu(HWND hwnd) {
     if (command >= baseId && command < baseId + tags.size()) {
         g_app.activeTag = tags[command - baseId];
         g_app.scrollIndex = 0;
-        InvalidateRect(hwnd, nullptr, FALSE);
+        RequestRender(hwnd);
     }
 }
 
@@ -342,7 +347,7 @@ void DeleteFromDialog(HWND hwnd) {
         g_app.scrollIndex = std::clamp(g_app.scrollIndex, 0, static_cast<int>(visible.size()) - 1);
     }
     SaveLinks(g_app.entries);
-    InvalidateRect(hwnd, nullptr, FALSE);
+    RequestRender(hwnd);
 }
 
 void EditEntry(HWND hwnd, size_t index) {
@@ -372,7 +377,7 @@ void EditEntry(HWND hwnd, size_t index) {
         g_app.scrollIndex = PositionInVisible(index);
     }
     SaveLinks(g_app.entries);
-    InvalidateRect(hwnd, nullptr, FALSE);
+    RequestRender(hwnd);
 }
 
 void FinishPress(HWND hwnd, POINT point) {
@@ -411,7 +416,7 @@ void FinishPress(HWND hwnd, POINT point) {
             OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
         } else if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
             g_app.scrollIndex = PositionInVisible(g_app.pressEntryIndex);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            RequestRender(hwnd);
         }
         break;
     default:
@@ -527,7 +532,7 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
 }
 
 void DrawAddButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(155, 110, 126, 150));
+    SolidBrush brush(Color(190, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     Pen pen(Color(220, 0, 0, 0), 3.0f);
     float cx = static_cast<float>(rect.x + rect.w / 2);
@@ -537,13 +542,13 @@ void DrawAddButton(Graphics& graphics, const RectI& rect) {
 }
 
 void DrawTagButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(155, 110, 126, 150));
+    SolidBrush brush(Color(190, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(230, 0, 0, 0), StringAlignmentCenter);
 }
 
 void DrawDeleteButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(155, 110, 126, 150));
+    SolidBrush brush(Color(190, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     Pen pen(Color(220, 0, 0, 0), 3.0f);
     graphics.DrawLine(&pen, rect.x + 8, rect.y + 8, rect.x + rect.w - 8, rect.y + rect.h - 8);
@@ -551,7 +556,7 @@ void DrawDeleteButton(Graphics& graphics, const RectI& rect) {
 }
 
 void DrawMoveHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(155, 110, 126, 150));
+    SolidBrush brush(Color(190, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     Pen pen(Color(220, 0, 0, 0), 3.0f);
     float centerX = static_cast<float>(rect.x + rect.w / 2);
@@ -565,7 +570,7 @@ void DrawMoveHandle(Graphics& graphics, const RectI& rect) {
 }
 
 void DrawResizeHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(155, 110, 126, 150));
+    SolidBrush brush(Color(190, 110, 126, 150));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
     Pen pen(Color(220, 0, 0, 0), 3.0f);
     int right = rect.x + rect.w - 7;
@@ -575,6 +580,20 @@ void DrawResizeHandle(Graphics& graphics, const RectI& rect) {
 }
 
 void RenderWindow(HWND hwnd) {
+    if (g_app.rendering) {
+        return;
+    }
+
+    struct RenderScope {
+        bool& value;
+        explicit RenderScope(bool& target) : value(target) {
+            value = true;
+        }
+        ~RenderScope() {
+            value = false;
+        }
+    } scope(g_app.rendering);
+
     RECT window{};
     GetWindowRect(hwnd, &window);
     int width = window.right - window.left;
@@ -597,7 +616,7 @@ void RenderWindow(HWND hwnd) {
     info.bmiHeader.biCompression = BI_RGB;
     void* bits = nullptr;
     HBITMAP bitmap = CreateDIBSection(screenDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!memoryDc || !bitmap) {
+    if (!memoryDc || !bitmap || !bits) {
         if (bitmap) {
             DeleteObject(bitmap);
         }
@@ -610,13 +629,14 @@ void RenderWindow(HWND hwnd) {
     HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
 
     {
-        Graphics graphics(memoryDc);
+        Bitmap surface(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
+        Graphics graphics(&surface);
         graphics.SetCompositingMode(CompositingModeSourceCopy);
         graphics.Clear(Color(0, 0, 0, 0));
         graphics.SetCompositingMode(CompositingModeSourceOver);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+        graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 
         Layout layout = BuildLayout(width, height);
         for (const auto& card : layout.cards) {
@@ -646,6 +666,12 @@ void RenderWindow(HWND hwnd) {
     ValidateRect(hwnd, nullptr);
 }
 
+void RequestRender(HWND hwnd) {
+    if (hwnd && IsWindow(hwnd)) {
+        RenderWindow(hwnd);
+    }
+}
+
 void AddEntry(const AddResult& result) {
     LinkEntry entry;
     entry.title = result.title.empty() ? L"제목 없음" : result.title;
@@ -656,7 +682,7 @@ void AddEntry(const AddResult& result) {
     g_app.activeTag = NormalizedTag(g_app.entries.back().tag);
     g_app.scrollIndex = PositionInVisible(g_app.entries.size() - 1);
     SaveLinks(g_app.entries);
-    InvalidateRect(g_app.window, nullptr, FALSE);
+    RequestRender(g_app.window);
 }
 
 void OpenUrl(const std::wstring& url) {
@@ -674,7 +700,7 @@ void ScrollBy(int delta) {
         g_app.scrollIndex += count;
     }
     if (before != g_app.scrollIndex) {
-        InvalidateRect(g_app.window, nullptr, FALSE);
+        RequestRender(g_app.window);
     }
 }
 
@@ -777,7 +803,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_SIZE:
-        InvalidateRect(hwnd, nullptr, FALSE);
+        RequestRender(hwnd);
         return 0;
     case WM_EXITSIZEMOVE:
         SaveCurrentWindowSettings(hwnd);
@@ -795,7 +821,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_WINDOWPOSCHANGED:
         RememberCurrentWindowSettings(hwnd);
         if ((reinterpret_cast<WINDOWPOS*>(lParam)->flags & SWP_NOSIZE) == 0) {
-            InvalidateRect(hwnd, nullptr, FALSE);
+            RequestRender(hwnd);
         }
         break;
     case WM_PAINT:
@@ -864,8 +890,9 @@ int RunApp(HINSTANCE instance, int showCommand) {
         return 1;
     }
 
+    RenderWindow(g_app.window);
     ShowWindow(g_app.window, showCommand);
-    UpdateWindow(g_app.window);
+    RenderWindow(g_app.window);
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {

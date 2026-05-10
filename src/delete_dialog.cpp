@@ -120,17 +120,23 @@ size_t ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector<LinkE
     DeleteDialogState state;
     state.instance = instance;
 
-    if (activeTag != L"전체") {
-        for (size_t i = 0; i < entries.size(); ++i) {
-            std::wstring tag = entries[i].tag.empty() ? L"전체" : entries[i].tag;
-            if (tag == activeTag) {
-                state.choices.push_back({i, L"[현재 태그] " + EntryLabel(entries[i])});
-            }
+    for (size_t i = 0; i < entries.size(); ++i) {
+        std::wstring tag = entries[i].tag.empty() ? L"전체" : entries[i].tag;
+        if (tag == activeTag && activeTag != L"전체") {
+            state.choices.push_back({i, L"[현재 태그] " + EntryLabel(entries[i])});
         }
     }
 
     for (size_t i = 0; i < entries.size(); ++i) {
-        state.choices.push_back({i, L"[전체] " + EntryLabel(entries[i])});
+        std::wstring tag = entries[i].tag.empty() ? L"전체" : entries[i].tag;
+        if (tag == L"전체") {
+            state.choices.push_back({i, L"[전체 태그] " + EntryLabel(entries[i])});
+        }
+    }
+
+    if (state.choices.empty()) {
+        MessageBoxW(parent, L"삭제할 영상이 없습니다.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
+        return std::numeric_limits<size_t>::max();
     }
 
     RECT parentRect{};

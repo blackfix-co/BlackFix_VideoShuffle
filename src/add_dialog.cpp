@@ -29,7 +29,7 @@ std::wstring ReadWindowText(HWND hwnd) {
     std::wstring text(length + 1, L'\0');
     GetWindowTextW(hwnd, text.data(), length + 1);
     text.resize(length);
-        return text;
+    return text;
 }
 
 std::wstring ReadComboText(HWND hwnd) {
