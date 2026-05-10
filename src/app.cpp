@@ -635,12 +635,16 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
         graphics.ResetClip();
     }
 
-    RectI titleBar{rect.x, rect.y + rect.h - 42, rect.w, 42};
+    int titleHeight = std::clamp(rect.h / 6, 34, 72);
+    int horizontalPadding = std::clamp(rect.w / 14, 8, 22);
+    int verticalPadding = std::clamp(titleHeight / 7, 4, 10);
+    RectI titleBar{rect.x, rect.y + rect.h - titleHeight, rect.w, titleHeight};
     SolidBrush titleBrush(card.active ? Color(255, 92, 109, 132) : Color(255, 84, 95, 112));
     graphics.FillRectangle(&titleBrush, titleBar.x, titleBar.y, titleBar.w, titleBar.h);
     std::wstring title = entry.title.empty() ? L"제목 없음" : entry.title;
-    float fontSize = card.active ? 15.0f : 13.0f;
-    DrawText(graphics, title, RectF(static_cast<float>(rect.x + 10), static_cast<float>(rect.y + rect.h - 39), static_cast<float>(rect.w - 20), 34.0f), fontSize, Color(255, 245, 248, 252), StringAlignmentCenter);
+    float fontScale = card.active ? 0.42f : 0.38f;
+    float fontSize = std::clamp(static_cast<float>(titleHeight) * fontScale, 12.0f, 26.0f);
+    DrawText(graphics, title, RectF(static_cast<float>(titleBar.x + horizontalPadding), static_cast<float>(titleBar.y + verticalPadding), static_cast<float>(std::max(1, titleBar.w - horizontalPadding * 2)), static_cast<float>(std::max(1, titleBar.h - verticalPadding * 2))), fontSize, Color(255, 245, 248, 252), StringAlignmentCenter);
 }
 
 void DrawAddButton(Graphics& graphics, const RectI& rect) {
