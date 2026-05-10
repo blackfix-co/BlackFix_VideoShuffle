@@ -547,23 +547,42 @@ Layout BuildLayout(int width, int height) {
 
     int top = 58;
     int bottom = 58;
-    int gap = 18;
+    int gap = std::clamp(width / 28, 14, 32);
+    int availableWidth = std::max(120, width - 24);
     int availableHeight = std::max(96, height - top - bottom);
-    int centerWidth = std::clamp((width - 76) / 3, 92, 150);
-    int sideWidth = std::max(72, static_cast<int>(centerWidth * 0.78));
-    int totalWidth = sideWidth * 2 + centerWidth + gap * 2;
-    if (totalWidth > width - 24) {
-        double scale = static_cast<double>(std::max(180, width - 24)) / static_cast<double>(totalWidth);
-        centerWidth = std::max(82, static_cast<int>(centerWidth * scale));
-        sideWidth = std::max(64, static_cast<int>(sideWidth * scale));
+    double sideScale = 0.78;
+    double cardAspect = 1.52;
+
+    double widthRatio = 1.0;
+    if (count == 2) {
+        widthRatio += sideScale;
+    } else if (count > 2) {
+        widthRatio += sideScale * 2.0;
     }
 
-    int centerHeight = std::clamp(static_cast<int>(centerWidth * 1.52), 112, availableHeight);
+    int gapCount = count == 1 ? 0 : (count == 2 ? 1 : 2);
+    int widthLimit = static_cast<int>((availableWidth - gap * gapCount) / widthRatio);
+    int heightLimit = static_cast<int>(availableHeight / cardAspect);
+    int centerWidth = std::max(82, std::min(widthLimit, heightLimit));
+    int sideWidth = std::max(64, static_cast<int>(centerWidth * sideScale));
+    int centerHeight = std::clamp(static_cast<int>(centerWidth * cardAspect), 112, availableHeight);
     int sideHeight = std::clamp(static_cast<int>(centerHeight * 0.82), 92, availableHeight);
-    int centerX = (width - centerWidth) / 2;
+
+    int totalWidth = centerWidth;
+    if (count == 2) {
+        totalWidth += gap + sideWidth;
+    } else if (count > 2) {
+        totalWidth += (gap + sideWidth) * 2;
+    }
+
+    int groupX = (width - totalWidth) / 2;
+    int centerX = count == 1 ? (width - centerWidth) / 2 : groupX;
+    if (count > 2) {
+        centerX = groupX + sideWidth + gap;
+    }
     int centerY = top + (availableHeight - centerHeight) / 2;
     int sideY = centerY + (centerHeight - sideHeight) / 2;
-    int leftX = centerX - gap - sideWidth;
+    int leftX = groupX;
     int rightX = centerX + centerWidth + gap;
 
     auto wrapIndex = [&visible, count](int index) {
