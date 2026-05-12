@@ -3,6 +3,8 @@
 #include "utils.hpp"
 
 #include <windowsx.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <utility>
 
@@ -24,6 +26,7 @@ constexpr int kNewTagCancelId = 504;
 constexpr COLORREF kDarkBackground = RGB(24, 26, 32);
 constexpr COLORREF kDarkPanel = RGB(34, 37, 45);
 constexpr COLORREF kDarkText = RGB(255, 255, 255);
+constexpr DWORD kDarkTitleBarAttribute = 20;
 
 struct VideoChoice {
     size_t index{};
@@ -81,12 +84,41 @@ void ApplyFont(HWND hwnd, HFONT font) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
+void ApplyDarkWindow(HWND hwnd) {
+    BOOL enabled = TRUE;
+    DwmSetWindowAttribute(hwnd, kDarkTitleBarAttribute, &enabled, sizeof(enabled));
+    SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+}
+
 HBRUSH ApplyControlColors(WPARAM wParam, HBRUSH brush, COLORREF background) {
     HDC dc = reinterpret_cast<HDC>(wParam);
     SetTextColor(dc, kDarkText);
     SetBkColor(dc, background);
     SetBkMode(dc, TRANSPARENT);
     return brush;
+}
+
+void DrawDarkButton(const DRAWITEMSTRUCT* item) {
+    bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    COLORREF fillColor = pressed ? RGB(48, 52, 63) : RGB(34, 37, 45);
+    COLORREF borderColor = RGB(80, 86, 102);
+    COLORREF textColor = disabled ? RGB(130, 135, 146) : kDarkText;
+
+    HBRUSH fill = CreateSolidBrush(fillColor);
+    FillRect(item->hDC, &item->rcItem, fill);
+    DeleteObject(fill);
+
+    HBRUSH border = CreateSolidBrush(borderColor);
+    FrameRect(item->hDC, &item->rcItem, border);
+    DeleteObject(border);
+
+    wchar_t text[128]{};
+    GetWindowTextW(item->hwndItem, text, static_cast<int>(sizeof(text) / sizeof(text[0])));
+    SetTextColor(item->hDC, textColor);
+    SetBkMode(item->hDC, TRANSPARENT);
+    RECT textRect = item->rcItem;
+    DrawTextW(item->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 HMENU MenuId(int value) {
@@ -128,6 +160,7 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 
     switch (message) {
     case WM_CREATE: {
+        ApplyDarkWindow(hwnd);
         state->font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
         state->backgroundBrush = CreateSolidBrush(kDarkBackground);
         state->panelBrush = CreateSolidBrush(kDarkPanel);
@@ -135,10 +168,11 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 84, 14, 278, 28, hwnd, MenuId(kNewTagEditId), state->instance, nullptr);
         HWND listLabel = CreateWindowW(L"STATIC", L"넣을 영상", WS_CHILD | WS_VISIBLE, 18, 56, 86, 24, hwnd, nullptr, state->instance, nullptr);
         state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_MULTIPLESEL, 18, 82, 344, 156, hwnd, MenuId(kNewTagListId), state->instance, nullptr);
-        HWND okButton = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 196, 252, 78, 30, hwnd, MenuId(kNewTagOkId), state->instance, nullptr);
-        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 284, 252, 78, 30, hwnd, MenuId(kNewTagCancelId), state->instance, nullptr);
+        HWND okButton = CreateWindowW(L"BUTTON", L"확인", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 196, 252, 78, 30, hwnd, MenuId(kNewTagOkId), state->instance, nullptr);
+        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 284, 252, 78, 30, hwnd, MenuId(kNewTagCancelId), state->instance, nullptr);
         for (HWND control : {label, state->edit, listLabel, state->list, okButton, cancelButton}) {
             ApplyFont(control, state->font);
+            ApplyDarkWindow(control);
         }
         for (const auto& choice : state->choices) {
             SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.label.c_str()));
@@ -154,6 +188,12 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
         return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
+    case WM_DRAWITEM:
+        if (reinterpret_cast<DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_BUTTON) {
+            DrawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case kNewTagOkId:
@@ -208,7 +248,7 @@ void RegisterNewTagDialogClass(HINSTANCE instance) {
     dialogClass.lpfnWndProc = NewTagDialogProc;
     dialogClass.hInstance = instance;
     dialogClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     dialogClass.lpszClassName = kTagDialogClassName;
     RegisterClassExW(&dialogClass);
     registered = true;
@@ -260,6 +300,7 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
 
     switch (message) {
     case WM_CREATE: {
+        ApplyDarkWindow(hwnd);
         state->font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
         state->backgroundBrush = CreateSolidBrush(kDarkBackground);
         state->panelBrush = CreateSolidBrush(kDarkPanel);
@@ -270,8 +311,8 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         HWND tagLabel = CreateWindowW(L"STATIC", L"태그", WS_CHILD | WS_VISIBLE, 22, 106, 54, 24, hwnd, nullptr, state->instance, nullptr);
         state->tagCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL, 82, 102, 260, 120, hwnd, MenuId(kTagComboId), state->instance, nullptr);
         state->previewCheck = CreateWindowW(L"BUTTON", L"1분 미리보기 반복", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 82, 136, 170, 24, hwnd, MenuId(kPreviewCheckId), state->instance, nullptr);
-        HWND addButton = CreateWindowW(L"BUTTON", state->input.editing ? L"수정" : L"추가", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 176, 166, 78, 30, hwnd, MenuId(kAddButtonId), state->instance, nullptr);
-        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 264, 166, 78, 30, hwnd, MenuId(kCancelButtonId), state->instance, nullptr);
+        HWND addButton = CreateWindowW(L"BUTTON", state->input.editing ? L"수정" : L"추가", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 176, 166, 78, 30, hwnd, MenuId(kAddButtonId), state->instance, nullptr);
+        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 264, 166, 78, 30, hwnd, MenuId(kCancelButtonId), state->instance, nullptr);
         SendMessageW(state->tagCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kTagAddText));
         for (const auto& tag : state->tags) {
             SendMessageW(state->tagCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(tag.c_str()));
@@ -281,6 +322,7 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         SendMessageW(state->previewCheck, BM_SETCHECK, state->input.preview ? BST_CHECKED : BST_UNCHECKED, 0);
         for (HWND control : {titleLabel, state->titleEdit, urlLabel, state->urlEdit, tagLabel, state->tagCombo, state->previewCheck, addButton, cancelButton}) {
             ApplyFont(control, state->font);
+            ApplyDarkWindow(control);
         }
         SetFocus(state->titleEdit);
         return 0;
@@ -293,6 +335,12 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
         return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
+    case WM_DRAWITEM:
+        if (reinterpret_cast<DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_BUTTON) {
+            DrawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == kTagComboId && HIWORD(wParam) == CBN_SELCHANGE) {
             int selection = static_cast<int>(SendMessageW(state->tagCombo, CB_GETCURSEL, 0, 0));
@@ -382,7 +430,7 @@ void RegisterAddDialogClass(HINSTANCE instance) {
     dialogClass.lpfnWndProc = AddDialogProc;
     dialogClass.hInstance = instance;
     dialogClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     dialogClass.lpszClassName = kDialogClassName;
     RegisterClassExW(&dialogClass);
 }

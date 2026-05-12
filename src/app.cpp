@@ -76,6 +76,49 @@ std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url);
 void RenderWindow(HWND hwnd);
 void RequestRender(HWND hwnd);
 
+void AppendDarkMenuItem(HMENU menu, UINT id, const wchar_t* text, bool enabled = true) {
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_DATA;
+    item.fType = MFT_OWNERDRAW;
+    item.wID = id;
+    item.fState = enabled ? MFS_ENABLED : MFS_DISABLED;
+    item.dwItemData = reinterpret_cast<ULONG_PTR>(text);
+    InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &item);
+}
+
+void MeasureDarkMenuItem(MEASUREITEMSTRUCT* item) {
+    const wchar_t* text = reinterpret_cast<const wchar_t*>(item->itemData);
+    HDC dc = GetDC(nullptr);
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SIZE textSize{};
+    GetTextExtentPoint32W(dc, text, lstrlenW(text), &textSize);
+    SelectObject(dc, oldFont);
+    ReleaseDC(nullptr, dc);
+    item->itemWidth = static_cast<UINT>(std::max(118L, textSize.cx + 36));
+    item->itemHeight = 30;
+}
+
+void DrawDarkMenuItem(const DRAWITEMSTRUCT* item) {
+    const wchar_t* text = reinterpret_cast<const wchar_t*>(item->itemData);
+    bool selected = (item->itemState & ODS_SELECTED) != 0;
+    bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    COLORREF fillColor = selected ? RGB(48, 52, 63) : RGB(24, 26, 32);
+    COLORREF textColor = disabled ? RGB(126, 132, 144) : RGB(255, 255, 255);
+
+    HBRUSH fill = CreateSolidBrush(fillColor);
+    FillRect(item->hDC, &item->rcItem, fill);
+    DeleteObject(fill);
+
+    SetTextColor(item->hDC, textColor);
+    SetBkMode(item->hDC, TRANSPARENT);
+    RECT textRect = item->rcItem;
+    textRect.left += 14;
+    textRect.right -= 14;
+    DrawTextW(item->hDC, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 std::wstring CurrentExePath() {
     std::wstring path(MAX_PATH, L'\0');
     DWORD size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
@@ -165,17 +208,45 @@ RECT VirtualScreenRect() {
     return {screenX, screenY, screenX + screenW, screenY + screenH};
 }
 
-POINT ClampedPosition(int x, int y, int width, int height) {
+RectI UnionRect(const RectI& left, const RectI& right) {
+    int x1 = std::min(left.x, right.x);
+    int y1 = std::min(left.y, right.y);
+    int x2 = std::max(left.x + left.w, right.x + right.w);
+    int y2 = std::max(left.y + left.h, right.y + right.h);
+    return {x1, y1, x2 - x1, y2 - y1};
+}
+
+RectI VisibleContentBounds(int width, int height) {
+    Layout layout = BuildLayout(width, height);
+    RectI bounds = layout.tagButton;
+    bool hasBounds = bounds.w > 0 && bounds.h > 0;
+    for (const auto& card : layout.cards) {
+        bounds = hasBounds ? UnionRect(bounds, card.rect) : card.rect;
+        hasBounds = true;
+    }
+    return hasBounds ? bounds : RectI{0, 0, width, height};
+}
+
+POINT ClampedVisiblePosition(int x, int y, int width, int height) {
     RECT screen = VirtualScreenRect();
-    int screenW = screen.right - screen.left;
-    int screenH = screen.bottom - screen.top;
+    RectI bounds = VisibleContentBounds(width, height);
     POINT result{x, y};
-    int left = static_cast<int>(screen.left);
-    int top = static_cast<int>(screen.top);
-    int right = static_cast<int>(screen.right);
-    int bottom = static_cast<int>(screen.bottom);
-    result.x = width >= screenW ? left : std::clamp(x, left, right - width);
-    result.y = height >= screenH ? top : std::clamp(y, top, bottom - height);
+
+    int minX = screen.left - bounds.x;
+    int maxX = screen.right - (bounds.x + bounds.w);
+    int minY = screen.top - bounds.y;
+    int maxY = screen.bottom - (bounds.y + bounds.h);
+
+    if (bounds.w >= screen.right - screen.left) {
+        result.x = screen.left - bounds.x;
+    } else {
+        result.x = std::clamp(x, std::min(minX, maxX), std::max(minX, maxX));
+    }
+    if (bounds.h >= screen.bottom - screen.top) {
+        result.y = screen.top - bounds.y;
+    } else {
+        result.y = std::clamp(y, std::min(minY, maxY), std::max(minY, maxY));
+    }
     return result;
 }
 
@@ -203,7 +274,7 @@ WindowSettings EnsureVisible(WindowSettings settings) {
     int screenH = screen.bottom - screen.top;
     settings.width = std::clamp(settings.width, 280, std::max(280, screenW));
     settings.height = std::clamp(settings.height, 180, std::max(180, screenH));
-    POINT position = ClampedPosition(settings.x, settings.y, settings.width, settings.height);
+    POINT position = ClampedVisiblePosition(settings.x, settings.y, settings.width, settings.height);
     settings.x = position.x;
     settings.y = position.y;
     return settings;
@@ -430,7 +501,7 @@ void MoveWindowFromDrag(HWND hwnd, POINT screenPoint) {
     }
     int width = g_app.pressWindow.right - g_app.pressWindow.left;
     int height = g_app.pressWindow.bottom - g_app.pressWindow.top;
-    POINT position = ClampedPosition(g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height);
+    POINT position = ClampedVisiblePosition(g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height);
     SetWindowPos(hwnd, nullptr, position.x, position.y, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     RequestRender(hwnd);
 }
@@ -451,18 +522,16 @@ void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
     double scale = std::abs(widthScale - 1.0) >= std::abs(heightScale - 1.0) ? widthScale : heightScale;
 
     RECT screen = VirtualScreenRect();
-    POINT anchor = ClampedPosition(g_app.pressWindow.left, g_app.pressWindow.top, originalWidth, originalHeight);
-    int anchorX = static_cast<int>(anchor.x);
-    int anchorY = static_cast<int>(anchor.y);
-    int maxWidth = std::max(minWidth, static_cast<int>(screen.right) - anchorX);
-    int maxHeight = std::max(minHeight, static_cast<int>(screen.bottom) - anchorY);
+    int maxWidth = std::max(minWidth, static_cast<int>(screen.right - screen.left));
+    int maxHeight = std::max(minHeight, static_cast<int>(screen.bottom - screen.top));
     double minScale = std::max(static_cast<double>(minWidth) / originalWidth, static_cast<double>(minHeight) / originalHeight);
     double maxScale = std::min(static_cast<double>(maxWidth) / originalWidth, static_cast<double>(maxHeight) / originalHeight);
     scale = std::clamp(scale, minScale, std::max(minScale, maxScale));
 
     int newWidth = std::max(minWidth, static_cast<int>(originalWidth * scale));
     int newHeight = std::max(minHeight, static_cast<int>(originalHeight * scale));
-    SetWindowPos(hwnd, nullptr, anchorX, anchorY, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    POINT position = ClampedVisiblePosition(g_app.pressWindow.left, g_app.pressWindow.top, newWidth, newHeight);
+    SetWindowPos(hwnd, nullptr, position.x, position.y, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
     RequestRender(hwnd);
 }
 
@@ -509,11 +578,7 @@ void ShowTagMenu(HWND hwnd) {
 
     constexpr UINT baseId = 3000;
     for (size_t i = 0; i < tags.size(); ++i) {
-        UINT flags = MF_STRING;
-        if (tags[i] == g_app.activeTag) {
-            flags |= MF_CHECKED;
-        }
-        AppendMenuW(menu, flags, baseId + static_cast<UINT>(i), tags[i].c_str());
+        AppendDarkMenuItem(menu, baseId + static_cast<UINT>(i), tags[i].c_str());
     }
 
     RECT client{};
@@ -693,17 +758,14 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     constexpr UINT closeId = 4106;
 
     size_t cardIndex = CardAt(hwnd, clientPoint);
-    AppendMenuW(menu, MF_STRING, addId, L"+");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendDarkMenuItem(menu, addId, L"+");
     if (cardIndex < g_app.entries.size()) {
-        AppendMenuW(menu, MF_STRING, editId, L"영상 수정");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendDarkMenuItem(menu, editId, L"영상 수정");
     }
-    AppendMenuW(menu, MF_STRING, moveId, L"위치 이동");
-    AppendMenuW(menu, MF_STRING, resizeId, L"크기 조절");
-    AppendMenuW(menu, g_app.entries.empty() && g_app.tags.empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteId, L"지우기");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, closeId, L"끄기");
+    AppendDarkMenuItem(menu, moveId, L"위치 이동");
+    AppendDarkMenuItem(menu, resizeId, L"크기 조절");
+    AppendDarkMenuItem(menu, deleteId, L"지우기", !g_app.entries.empty() || !g_app.tags.empty());
+    AppendDarkMenuItem(menu, closeId, L"끄기");
 
     SetForegroundWindow(hwnd);
     UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screenPoint.x, screenPoint.y + 8, 0, hwnd, nullptr);
@@ -908,25 +970,12 @@ Layout BuildLayout(int width, int height) {
         return card.active;
     });
     if (activeCard != layout.cards.end()) {
-        int tagWidth = std::clamp(42 + static_cast<int>(g_app.activeTag.size()) * 9, 74, std::min(170, activeCard->rect.w));
-        layout.tagButton = {activeCard->rect.x, activeCard->rect.y, tagWidth, 26};
+        int tagHeight = std::clamp(activeCard->rect.h / 13, 26, 48);
+        int tagWidth = std::clamp(tagHeight + static_cast<int>(g_app.activeTag.size()) * tagHeight / 2, 76, std::min(220, activeCard->rect.w));
+        layout.tagButton = {activeCard->rect.x, activeCard->rect.y, tagWidth, tagHeight};
     }
 
     return layout;
-}
-
-void DrawText(Graphics& graphics, const std::wstring& text, RectF bounds, float size, Color color, StringAlignment lineAlignment) {
-    if (text.empty()) {
-        return;
-    }
-    Font font(L"Malgun Gothic", size, FontStyleRegular, UnitPixel);
-    SolidBrush brush(color);
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(lineAlignment);
-    format.SetTrimming(StringTrimmingEllipsisWord);
-    format.SetFormatFlags(StringFormatFlagsLineLimit);
-    graphics.DrawString(text.c_str(), -1, &font, bounds, &format, &brush);
 }
 
 bool TextFits(Graphics& graphics, const std::wstring& text, RectF bounds, float fontSize, StringFormat& format) {
@@ -952,11 +1001,11 @@ struct TitleLayout {
 };
 
 TitleLayout BuildTitleLayout(Graphics& graphics, const RectI& rect, const std::wstring& title, bool active) {
-    int baseHeight = std::clamp(rect.h / 6, 34, 72);
+    int baseHeight = std::clamp(rect.h / 5, 34, 130);
     int maxHeight = std::max(baseHeight, rect.h - 4);
     int horizontalPadding = std::clamp(rect.w / 14, 8, 22);
-    float preferredSize = std::clamp(static_cast<float>(baseHeight) * (active ? 0.42f : 0.38f), 12.0f, 26.0f);
-    float minimumSize = 5.0f;
+    float preferredSize = std::clamp(static_cast<float>(rect.h) * (active ? 0.075f : 0.06f), 12.0f, active ? 46.0f : 34.0f);
+    float minimumSize = 6.0f;
 
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -1024,7 +1073,16 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
 void DrawTagButton(Graphics& graphics, const RectI& rect) {
     SolidBrush brush(Color(210, 24, 28, 34));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(255, 255, 255, 255), StringAlignmentCenter);
+    RectF bounds(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8));
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetTrimming(StringTrimmingEllipsisWord);
+    format.SetFormatFlags(StringFormatFlagsLineLimit);
+    float fontSize = FitTextSize(graphics, g_app.activeTag, bounds, std::clamp(static_cast<float>(rect.h) * 0.52f, 13.0f, 26.0f), 8.0f, format);
+    Font font(L"Malgun Gothic", fontSize, FontStyleRegular, UnitPixel);
+    SolidBrush textBrush(Color(255, 255, 255, 255));
+    graphics.DrawString(g_app.activeTag.c_str(), -1, &font, bounds, &format, &textBrush);
 }
 
 void RenderWindow(HWND hwnd) {
@@ -1295,6 +1353,18 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         return 0;
+    case WM_MEASUREITEM:
+        if (reinterpret_cast<MEASUREITEMSTRUCT*>(lParam)->CtlType == ODT_MENU) {
+            MeasureDarkMenuItem(reinterpret_cast<MEASUREITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
+    case WM_DRAWITEM:
+        if (reinterpret_cast<DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_MENU) {
+            DrawDarkMenuItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
     case WM_WINDOWPOSCHANGED:
         RememberCurrentWindowSettings(hwnd);
         if ((reinterpret_cast<WINDOWPOS*>(lParam)->flags & SWP_NOSIZE) == 0) {

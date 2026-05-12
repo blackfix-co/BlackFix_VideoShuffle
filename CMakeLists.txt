@@ -17,7 +17,7 @@ add_executable(BlackFix_VideoShuffle WIN32
 
 target_compile_features(BlackFix_VideoShuffle PRIVATE cxx_std_17)
 target_compile_definitions(BlackFix_VideoShuffle PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(BlackFix_VideoShuffle PRIVATE gdiplus winhttp shell32 user32 gdi32 ole32)
+target_link_libraries(BlackFix_VideoShuffle PRIVATE gdiplus winhttp shell32 user32 gdi32 ole32 dwmapi uxtheme)
 
 if(MSVC)
     target_compile_options(BlackFix_VideoShuffle PRIVATE /W4 /permissive- /EHsc)

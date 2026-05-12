@@ -1,6 +1,8 @@
 #include "delete_dialog.hpp"
 
 #include <windowsx.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 
@@ -17,6 +19,7 @@ constexpr int kContentLeft = 16;
 constexpr COLORREF kDarkBackground = RGB(24, 26, 32);
 constexpr COLORREF kDarkPanel = RGB(34, 37, 45);
 constexpr COLORREF kDarkText = RGB(255, 255, 255);
+constexpr DWORD kDarkTitleBarAttribute = 20;
 
 struct DeleteChoice {
     size_t index{};
@@ -61,12 +64,41 @@ void ApplyFont(HWND hwnd, HFONT font) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
+void ApplyDarkWindow(HWND hwnd) {
+    BOOL enabled = TRUE;
+    DwmSetWindowAttribute(hwnd, kDarkTitleBarAttribute, &enabled, sizeof(enabled));
+    SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+}
+
 HBRUSH ApplyControlColors(WPARAM wParam, HBRUSH brush, COLORREF background) {
     HDC dc = reinterpret_cast<HDC>(wParam);
     SetTextColor(dc, kDarkText);
     SetBkColor(dc, background);
     SetBkMode(dc, TRANSPARENT);
     return brush;
+}
+
+void DrawDarkButton(const DRAWITEMSTRUCT* item) {
+    bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    COLORREF fillColor = pressed ? RGB(48, 52, 63) : RGB(34, 37, 45);
+    COLORREF borderColor = RGB(80, 86, 102);
+    COLORREF textColor = disabled ? RGB(130, 135, 146) : kDarkText;
+
+    HBRUSH fill = CreateSolidBrush(fillColor);
+    FillRect(item->hDC, &item->rcItem, fill);
+    DeleteObject(fill);
+
+    HBRUSH border = CreateSolidBrush(borderColor);
+    FrameRect(item->hDC, &item->rcItem, border);
+    DeleteObject(border);
+
+    wchar_t text[128]{};
+    GetWindowTextW(item->hwndItem, text, static_cast<int>(sizeof(text) / sizeof(text[0])));
+    SetTextColor(item->hDC, textColor);
+    SetBkMode(item->hDC, TRANSPARENT);
+    RECT textRect = item->rcItem;
+    DrawTextW(item->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 std::wstring NormalizedTagName(const LinkEntry& entry) {
@@ -207,6 +239,7 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
     int y = 0;
     state->rootCheck = CreateWindowW(L"BUTTON", L"전체태그", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_NOTIFY, 0, 0, 1, 1, hwnd, MenuId(kRootCheckId), state->instance, nullptr);
     ApplyFont(state->rootCheck, state->font);
+    ApplyDarkWindow(state->rootCheck);
     y += 30;
 
     for (const auto& choice : state->choices) {
@@ -216,6 +249,7 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
         std::wstring itemLabel = L"- " + choice.label;
         HWND itemCheck = CreateWindowW(L"BUTTON", itemLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
         ApplyFont(itemCheck, state->font);
+        ApplyDarkWindow(itemCheck);
         state->items.push_back({choice.index, choice.tag, itemCheck, 18, y});
         y += 26;
     }
@@ -228,6 +262,7 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
         std::wstring label = L"- " + tagName;
         HWND tagCheck = CreateWindowW(L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_NOTIFY, 0, 0, 1, 1, hwnd, MenuId(kTagCheckBaseId + static_cast<int>(tagIndex)), state->instance, nullptr);
         ApplyFont(tagCheck, state->font);
+        ApplyDarkWindow(tagCheck);
         state->tags.push_back({tagName, tagCheck, y});
         y += 26;
         ++tagIndex;
@@ -240,6 +275,7 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
             std::wstring itemLabel = L"- " + choice.label;
             HWND itemCheck = CreateWindowW(L"BUTTON", itemLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
             ApplyFont(itemCheck, state->font);
+            ApplyDarkWindow(itemCheck);
             state->items.push_back({choice.index, choice.tag, itemCheck, 42, y});
             y += 26;
         }
@@ -259,13 +295,16 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 
     switch (message) {
     case WM_CREATE: {
+        ApplyDarkWindow(hwnd);
         state->font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
         state->backgroundBrush = CreateSolidBrush(kDarkBackground);
         state->panelBrush = CreateSolidBrush(kDarkPanel);
-        HWND okButton = CreateWindowW(L"BUTTON", L"지우기", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 338, 400, 78, 30, hwnd, MenuId(kOkId), state->instance, nullptr);
-        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 426, 400, 78, 30, hwnd, MenuId(kCancelId), state->instance, nullptr);
+        HWND okButton = CreateWindowW(L"BUTTON", L"지우기", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 338, 400, 78, 30, hwnd, MenuId(kOkId), state->instance, nullptr);
+        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 426, 400, 78, 30, hwnd, MenuId(kCancelId), state->instance, nullptr);
         ApplyFont(okButton, state->font);
         ApplyFont(cancelButton, state->font);
+        ApplyDarkWindow(okButton);
+        ApplyDarkWindow(cancelButton);
         CreateTreeControls(hwnd, state);
         return 0;
     }
@@ -277,6 +316,12 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
         return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
+    case WM_DRAWITEM:
+        if (reinterpret_cast<DRAWITEMSTRUCT*>(lParam)->CtlType == ODT_BUTTON) {
+            DrawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
@@ -370,7 +415,7 @@ void RegisterDeleteDialogClass(HINSTANCE instance) {
     dialogClass.lpfnWndProc = DeleteDialogProc;
     dialogClass.hInstance = instance;
     dialogClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     dialogClass.lpszClassName = kDeleteDialogClassName;
     RegisterClassExW(&dialogClass);
 }
