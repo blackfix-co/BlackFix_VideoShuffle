@@ -7,15 +7,13 @@
 namespace {
 
 constexpr wchar_t kDeleteDialogClassName[] = L"BlackFixVideoShuffleDeleteDialog";
-constexpr int kDeleteAllId = 201;
-constexpr int kClearId = 202;
 constexpr int kOkId = 203;
 constexpr int kCancelId = 204;
-constexpr int kTagButtonBaseId = 3000;
-constexpr int kContentTop = 54;
+constexpr int kRootCheckId = 3000;
+constexpr int kTagCheckBaseId = 3100;
+constexpr int kContentTop = 16;
 constexpr int kContentBottom = 386;
 constexpr int kContentLeft = 16;
-constexpr int kContentWidth = 488;
 
 struct DeleteChoice {
     size_t index{};
@@ -30,20 +28,21 @@ struct ItemControl {
     int y{};
 };
 
-struct GroupControl {
+struct TagControl {
     std::wstring tag;
-    HWND label{};
-    HWND button{};
+    HWND check{};
     int y{};
 };
 
 struct DeleteDialogState {
     HINSTANCE instance{};
+    HWND rootCheck{};
     HFONT font{};
     std::vector<DeleteChoice> choices;
-    std::vector<GroupControl> groups;
+    std::vector<std::wstring> tagOrder;
+    std::vector<TagControl> tags;
     std::vector<ItemControl> items;
-    std::vector<size_t> result;
+    DeleteResult result;
     int contentHeight{};
     int scrollOffset{};
 };
@@ -75,12 +74,12 @@ void MoveScrolled(HWND hwnd, int x, int baseY, int w, int h, int offset) {
 }
 
 void LayoutDeleteControls(HWND hwnd, DeleteDialogState* state) {
-    for (const auto& group : state->groups) {
-        MoveScrolled(group.label, kContentLeft, group.y, 320, 24, state->scrollOffset);
-        MoveScrolled(group.button, kContentLeft + 354, group.y - 2, 70, 26, state->scrollOffset);
+    MoveScrolled(state->rootCheck, kContentLeft, 0, 430, 26, state->scrollOffset);
+    for (const auto& tag : state->tags) {
+        MoveScrolled(tag.check, kContentLeft + 18, tag.y, 420, 24, state->scrollOffset);
     }
     for (const auto& item : state->items) {
-        MoveScrolled(item.check, kContentLeft + 18, item.y, 440, 24, state->scrollOffset);
+        MoveScrolled(item.check, kContentLeft + 42, item.y, 420, 24, state->scrollOffset);
     }
 
     SCROLLINFO info{};
@@ -99,18 +98,40 @@ void SetScrollOffset(HWND hwnd, DeleteDialogState* state, int offset) {
     LayoutDeleteControls(hwnd, state);
 }
 
-void SetGroupChecked(DeleteDialogState* state, const std::wstring& tag, bool checked) {
+void SetAllChecked(DeleteDialogState* state, bool checked) {
+    SendMessageW(state->rootCheck, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    for (const auto& tag : state->tags) {
+        SendMessageW(tag.check, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     for (const auto& item : state->items) {
-        if (item.tag == tag) {
+        SendMessageW(item.check, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+}
+
+void SetTagChecked(DeleteDialogState* state, const std::wstring& tagName, bool checked) {
+    for (const auto& item : state->items) {
+        if (item.tag == tagName) {
             SendMessageW(item.check, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
         }
     }
 }
 
-void SetAllChecked(DeleteDialogState* state, bool checked) {
+std::vector<size_t> IndicesForTag(DeleteDialogState* state, const std::wstring& tagName) {
+    std::vector<size_t> indices;
     for (const auto& item : state->items) {
-        SendMessageW(item.check, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (item.tag == tagName) {
+            indices.push_back(item.index);
+        }
     }
+    return indices;
+}
+
+std::vector<size_t> AllIndices(DeleteDialogState* state) {
+    std::vector<size_t> indices;
+    for (const auto& item : state->items) {
+        indices.push_back(item.index);
+    }
+    return indices;
 }
 
 std::vector<size_t> CheckedIndices(DeleteDialogState* state) {
@@ -125,7 +146,17 @@ std::vector<size_t> CheckedIndices(DeleteDialogState* state) {
     return selected;
 }
 
-void ConfirmAndClose(HWND hwnd, DeleteDialogState* state, std::vector<size_t> indices) {
+std::vector<std::wstring> AllTagNames(DeleteDialogState* state) {
+    std::vector<std::wstring> tags;
+    for (const auto& tag : state->tags) {
+        if (tag.tag != L"전체") {
+            tags.push_back(tag.tag);
+        }
+    }
+    return tags;
+}
+
+void ConfirmAndClose(HWND hwnd, DeleteDialogState* state, std::vector<size_t> indices, std::vector<std::wstring> deletedTags = {}) {
     if (indices.empty()) {
         MessageBoxW(hwnd, L"지울 영상을 선택해줘.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
         return;
@@ -133,32 +164,55 @@ void ConfirmAndClose(HWND hwnd, DeleteDialogState* state, std::vector<size_t> in
 
     std::wstring messageText = std::to_wstring(indices.size()) + L"개 영상을 정말 지우시겠습니까?";
     if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-        state->result = std::move(indices);
+        state->result.indices = std::move(indices);
+        state->result.deletedTags = std::move(deletedTags);
         DestroyWindow(hwnd);
     }
 }
 
-void CreateGroupedControls(HWND hwnd, DeleteDialogState* state) {
-    int y = 0;
-    std::wstring currentTag;
-    size_t groupIndex = 0;
-
-    for (const auto& choice : state->choices) {
-        if (choice.tag != currentTag) {
-            currentTag = choice.tag;
-            HWND label = CreateWindowW(L"STATIC", currentTag.c_str(), WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
-            HWND button = CreateWindowW(L"BUTTON", L"선택", WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, hwnd, MenuId(kTagButtonBaseId + static_cast<int>(groupIndex)), state->instance, nullptr);
-            ApplyFont(label, state->font);
-            ApplyFont(button, state->font);
-            state->groups.push_back({currentTag, label, button, y});
-            y += 28;
-            ++groupIndex;
+void ConfirmTagDelete(HWND hwnd, DeleteDialogState* state, const std::wstring& tagName) {
+    std::vector<size_t> indices = IndicesForTag(state, tagName);
+    if (indices.empty() && tagName == L"전체") {
+        return;
+    }
+    std::wstring messageText = indices.empty()
+        ? tagName + L" 태그를 지우시겠습니까?"
+        : tagName + L" 태그의 " + std::to_wstring(indices.size()) + L"개 영상을 지우시겠습니까?";
+    if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+        state->result.indices = std::move(indices);
+        if (tagName != L"전체") {
+            state->result.deletedTags.push_back(tagName);
         }
+        DestroyWindow(hwnd);
+    }
+}
 
-        HWND check = CreateWindowW(L"BUTTON", choice.label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
-        ApplyFont(check, state->font);
-        state->items.push_back({choice.index, choice.tag, check, y});
+void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
+    int y = 0;
+    state->rootCheck = CreateWindowW(L"BUTTON", L"전체태그", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_NOTIFY, 0, 0, 1, 1, hwnd, MenuId(kRootCheckId), state->instance, nullptr);
+    ApplyFont(state->rootCheck, state->font);
+    y += 30;
+
+    size_t tagIndex = 0;
+    for (const auto& tagName : state->tagOrder) {
+        std::wstring label = L"- " + tagName;
+        HWND tagCheck = CreateWindowW(L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_NOTIFY, 0, 0, 1, 1, hwnd, MenuId(kTagCheckBaseId + static_cast<int>(tagIndex)), state->instance, nullptr);
+        ApplyFont(tagCheck, state->font);
+        state->tags.push_back({tagName, tagCheck, y});
         y += 26;
+        ++tagIndex;
+
+        for (const auto& choice : state->choices) {
+            if (choice.tag != tagName) {
+                continue;
+            }
+
+            std::wstring itemLabel = L"- " + choice.label;
+            HWND itemCheck = CreateWindowW(L"BUTTON", itemLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
+            ApplyFont(itemCheck, state->font);
+            state->items.push_back({choice.index, choice.tag, itemCheck, y});
+            y += 26;
+        }
     }
 
     state->contentHeight = y + 4;
@@ -176,36 +230,35 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     switch (message) {
     case WM_CREATE: {
         state->font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
-        HWND deleteAllButton = CreateWindowW(L"BUTTON", L"전체삭제", WS_CHILD | WS_VISIBLE, 16, 14, 84, 28, hwnd, MenuId(kDeleteAllId), state->instance, nullptr);
-        HWND clearButton = CreateWindowW(L"BUTTON", L"선택해제", WS_CHILD | WS_VISIBLE, 108, 14, 84, 28, hwnd, MenuId(kClearId), state->instance, nullptr);
         HWND okButton = CreateWindowW(L"BUTTON", L"지우기", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 338, 400, 78, 30, hwnd, MenuId(kOkId), state->instance, nullptr);
         HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 426, 400, 78, 30, hwnd, MenuId(kCancelId), state->instance, nullptr);
-        for (HWND control : {deleteAllButton, clearButton, okButton, cancelButton}) {
-            ApplyFont(control, state->font);
-        }
-        CreateGroupedControls(hwnd, state);
+        ApplyFont(okButton, state->font);
+        ApplyFont(cancelButton, state->font);
+        CreateTreeControls(hwnd, state);
         return 0;
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        if (id >= kTagButtonBaseId && id < kTagButtonBaseId + static_cast<int>(state->groups.size())) {
-            SetGroupChecked(state, state->groups[static_cast<size_t>(id - kTagButtonBaseId)].tag, true);
+        int code = HIWORD(wParam);
+        if (id == kRootCheckId) {
+            if (code == BN_DBLCLK) {
+                ConfirmAndClose(hwnd, state, AllIndices(state), AllTagNames(state));
+                return 0;
+            }
+            SetAllChecked(state, SendMessageW(state->rootCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            return 0;
+        }
+        if (id >= kTagCheckBaseId && id < kTagCheckBaseId + static_cast<int>(state->tags.size())) {
+            const auto& tag = state->tags[static_cast<size_t>(id - kTagCheckBaseId)];
+            if (code == BN_DBLCLK) {
+                ConfirmTagDelete(hwnd, state, tag.tag);
+                return 0;
+            }
+            SetTagChecked(state, tag.tag, SendMessageW(tag.check, BM_GETCHECK, 0, 0) == BST_CHECKED);
             return 0;
         }
 
         switch (id) {
-        case kDeleteAllId: {
-            std::vector<size_t> all;
-            all.reserve(state->items.size());
-            for (const auto& item : state->items) {
-                all.push_back(item.index);
-            }
-            ConfirmAndClose(hwnd, state, std::move(all));
-            return 0;
-        }
-        case kClearId:
-            SetAllChecked(state, false);
-            return 0;
         case kOkId:
             ConfirmAndClose(hwnd, state, CheckedIndices(state));
             return 0;
@@ -276,7 +329,7 @@ void RegisterDeleteDialogClass(HINSTANCE instance) {
 
 }
 
-std::vector<size_t> ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector<LinkEntry>& entries, const std::wstring&) {
+DeleteResult ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector<LinkEntry>& entries, const std::vector<std::wstring>& tags, const std::wstring&) {
     static bool registered = false;
     if (!registered) {
         RegisterDeleteDialogClass(instance);
@@ -292,14 +345,45 @@ std::vector<size_t> ShowDeleteDialog(HINSTANCE instance, HWND parent, const std:
     }
 
     std::sort(state.choices.begin(), state.choices.end(), [](const DeleteChoice& left, const DeleteChoice& right) {
+        if (left.tag == L"전체" && right.tag != L"전체") {
+            return true;
+        }
+        if (right.tag == L"전체" && left.tag != L"전체") {
+            return false;
+        }
         if (left.tag != right.tag) {
             return left.tag < right.tag;
         }
         return left.index < right.index;
     });
 
-    if (state.choices.empty()) {
-        MessageBoxW(parent, L"삭제할 영상이 없습니다.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
+    auto addTag = [&state](const std::wstring& tag) {
+        std::wstring clean = tag.empty() ? L"전체" : tag;
+        if (std::find(state.tagOrder.begin(), state.tagOrder.end(), clean) == state.tagOrder.end()) {
+            state.tagOrder.push_back(clean);
+        }
+    };
+
+    for (const auto& choice : state.choices) {
+        addTag(choice.tag);
+    }
+    for (const auto& tag : tags) {
+        if (tag != L"전체") {
+            addTag(tag);
+        }
+    }
+    std::stable_sort(state.tagOrder.begin(), state.tagOrder.end(), [](const std::wstring& left, const std::wstring& right) {
+        if (left == L"전체" && right != L"전체") {
+            return true;
+        }
+        if (right == L"전체" && left != L"전체") {
+            return false;
+        }
+        return left < right;
+    });
+
+    if (state.choices.empty() && state.tagOrder.empty()) {
+        MessageBoxW(parent, L"삭제할 영상이나 태그가 없습니다.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
         return {};
     }
 

@@ -33,6 +33,7 @@ struct AppState {
     HWND window{};
     ULONG_PTR gdiplusToken{};
     std::vector<LinkEntry> entries;
+    std::vector<std::wstring> tags;
     WindowSettings settings;
     std::wstring activeTag{kAllTag};
     int scrollIndex{};
@@ -67,8 +68,10 @@ Layout BuildLayout(int width, int height);
 void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
+void OpenEntry(const LinkEntry& entry);
 void DeleteIndices(HWND hwnd, std::vector<size_t> indices);
 void ApplyTagAssignments(const std::wstring& tag, const std::vector<size_t>& indices);
+void RemoveKnownTags(const std::vector<std::wstring>& tags);
 std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url);
 void RenderWindow(HWND hwnd);
 void RequestRender(HWND hwnd);
@@ -252,8 +255,36 @@ std::wstring NormalizedTag(std::wstring tag) {
     return tag.empty() ? kAllTag : tag;
 }
 
+bool AddKnownTag(const std::wstring& tag) {
+    std::wstring normalized = NormalizedTag(tag);
+    if (normalized == kAllTag) {
+        return false;
+    }
+    if (std::find(g_app.tags.begin(), g_app.tags.end(), normalized) != g_app.tags.end()) {
+        return false;
+    }
+    g_app.tags.push_back(normalized);
+    return true;
+}
+
+void RemoveKnownTags(const std::vector<std::wstring>& tags) {
+    for (const auto& tag : tags) {
+        std::wstring normalized = NormalizedTag(tag);
+        g_app.tags.erase(std::remove(g_app.tags.begin(), g_app.tags.end(), normalized), g_app.tags.end());
+        if (g_app.activeTag == normalized) {
+            g_app.activeTag = kAllTag;
+        }
+    }
+}
+
 std::vector<std::wstring> Tags() {
     std::vector<std::wstring> tags{kAllTag};
+    for (const auto& knownTag : g_app.tags) {
+        std::wstring tag = NormalizedTag(knownTag);
+        if (tag != kAllTag && std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            tags.push_back(tag);
+        }
+    }
     for (const auto& entry : g_app.entries) {
         std::wstring tag = NormalizedTag(entry.tag);
         if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
@@ -265,6 +296,52 @@ std::vector<std::wstring> Tags() {
 
 bool EntryInActiveTag(const LinkEntry& entry) {
     return g_app.activeTag == kAllTag || NormalizedTag(entry.tag) == g_app.activeTag;
+}
+
+std::wstring ExtractVideoIdAt(const std::wstring& url, size_t start) {
+    std::wstring id;
+    for (size_t i = start; i < url.size(); ++i) {
+        wchar_t ch = url[i];
+        bool allowed = (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9') || ch == L'_' || ch == L'-';
+        if (!allowed) {
+            break;
+        }
+        id.push_back(ch);
+    }
+    if (id.size() >= 11) {
+        id.resize(11);
+        return id;
+    }
+    return {};
+}
+
+std::wstring YoutubeVideoId(const std::wstring& url) {
+    std::wstring lower = LowerCopy(url);
+    const std::vector<std::wstring> patterns = {
+        L"youtu.be/",
+        L"/shorts/",
+        L"/embed/",
+        L"/live/"
+    };
+    for (const auto& pattern : patterns) {
+        size_t pos = lower.find(pattern);
+        if (pos != std::wstring::npos) {
+            return ExtractVideoIdAt(url, pos + pattern.size());
+        }
+    }
+    size_t query = lower.find(L"v=");
+    if (query != std::wstring::npos) {
+        return ExtractVideoIdAt(url, query + 2);
+    }
+    return {};
+}
+
+std::wstring PreviewUrl(const std::wstring& url) {
+    std::wstring id = YoutubeVideoId(url);
+    if (id.empty()) {
+        return url;
+    }
+    return L"https://www.youtube.com/embed/" + id + L"?autoplay=1&loop=1&playlist=" + id + L"&start=0&end=60";
 }
 
 std::vector<size_t> VisibleEntries() {
@@ -460,16 +537,22 @@ void ShowTagMenu(HWND hwnd) {
 }
 
 void DeleteFromDialog(HWND hwnd) {
-    if (g_app.entries.empty()) {
+    if (g_app.entries.empty() && g_app.tags.empty()) {
         return;
     }
 
-    std::vector<size_t> indices = ShowDeleteDialog(g_app.instance, hwnd, g_app.entries, g_app.activeTag);
-    if (indices.empty()) {
+    DeleteResult result = ShowDeleteDialog(g_app.instance, hwnd, g_app.entries, Tags(), g_app.activeTag);
+    if (result.indices.empty() && result.deletedTags.empty()) {
         return;
     }
 
-    DeleteIndices(hwnd, std::move(indices));
+    RemoveKnownTags(result.deletedTags);
+    if (!result.indices.empty()) {
+        DeleteIndices(hwnd, std::move(result.indices));
+    } else {
+        SaveTags(g_app.tags);
+        RequestRender(hwnd);
+    }
 }
 
 void DeleteIndices(HWND hwnd, std::vector<size_t> indices) {
@@ -495,29 +578,22 @@ void DeleteIndices(HWND hwnd, std::vector<size_t> indices) {
     g_app.carouselAnimating = false;
     g_app.animationProgress = 0.0;
     SaveLinks(g_app.entries);
+    SaveTags(g_app.tags);
     RequestRender(hwnd);
-}
-
-void DeleteActiveTag(HWND hwnd) {
-    std::vector<size_t> indices = VisibleEntries();
-    if (indices.empty()) {
-        MessageBoxW(hwnd, L"현재 태그에 삭제할 영상이 없습니다.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    std::wstring messageText = g_app.activeTag + L" 태그의 " + std::to_wstring(indices.size()) + L"개 영상을 모두 지우시겠습니까?";
-    if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-        DeleteIndices(hwnd, std::move(indices));
-    }
 }
 
 void ApplyTagAssignments(const std::wstring& tag, const std::vector<size_t>& indices) {
     std::wstring normalized = NormalizedTag(tag);
+    AddKnownTag(normalized);
     for (size_t index : indices) {
         if (index < g_app.entries.size()) {
             g_app.entries[index].tag = normalized;
         }
     }
+}
+
+std::wstring CreatedTagName(const AddResult& result) {
+    return result.createdTag.empty() ? result.tag : result.createdTag;
 }
 
 size_t CardAt(HWND hwnd, POINT point) {
@@ -542,17 +618,27 @@ void EditEntry(HWND hwnd, size_t index) {
     input.title = g_app.entries[index].title;
     input.url = g_app.entries[index].url;
     input.tag = NormalizedTag(g_app.entries[index].tag);
+    input.preview = g_app.entries[index].preview;
     AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
+    if (result.tagCreated) {
+        ApplyTagAssignments(CreatedTagName(result), result.tagAssignments);
+        SaveLinks(g_app.entries);
+        SaveTags(g_app.tags);
+        RequestRender(hwnd);
+    }
     if (!result.accepted) {
         return;
     }
 
-    ApplyTagAssignments(result.tag, result.tagAssignments);
+    if (!result.tagCreated) {
+        ApplyTagAssignments(result.tag, result.tagAssignments);
+    }
     bool urlChanged = g_app.entries[index].url != result.url;
     if (!result.url.empty()) {
         g_app.entries[index].title = ResolveTitle(result.title, result.url);
         g_app.entries[index].url = result.url;
         g_app.entries[index].tag = NormalizedTag(result.tag);
+        g_app.entries[index].preview = result.preview;
         if (urlChanged) {
             g_app.entries[index].thumbnail = LoadThumbnail(result.url);
         }
@@ -562,6 +648,7 @@ void EditEntry(HWND hwnd, size_t index) {
         g_app.scrollIndex = PositionInVisible(index);
     }
     SaveLinks(g_app.entries);
+    SaveTags(g_app.tags);
     RequestRender(hwnd);
 }
 
@@ -576,7 +663,6 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     constexpr UINT resizeId = 4103;
     constexpr UINT deleteId = 4104;
     constexpr UINT closeId = 4105;
-    constexpr UINT deleteTagId = 4106;
 
     size_t cardIndex = CardAt(hwnd, clientPoint);
     if (cardIndex < g_app.entries.size()) {
@@ -585,8 +671,7 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     }
     AppendMenuW(menu, MF_STRING, moveId, L"위치 이동");
     AppendMenuW(menu, MF_STRING, resizeId, L"크기 조절");
-    AppendMenuW(menu, g_app.entries.empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteId, L"지우기");
-    AppendMenuW(menu, VisibleEntries().empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteTagId, L"현재 태그 전체 지우기");
+    AppendMenuW(menu, g_app.entries.empty() && g_app.tags.empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteId, L"지우기");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, closeId, L"끄기");
 
@@ -611,9 +696,6 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
         break;
     case deleteId:
         DeleteFromDialog(hwnd);
-        break;
-    case deleteTagId:
-        DeleteActiveTag(hwnd);
         break;
     case closeId:
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -646,13 +728,26 @@ void FinishPress(HWND hwnd, POINT point) {
         VideoDialogInput input;
         input.tag = g_app.activeTag;
         AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
+        if (result.tagCreated) {
+            ApplyTagAssignments(CreatedTagName(result), result.tagAssignments);
+            g_app.activeTag = NormalizedTag(CreatedTagName(result));
+            g_app.scrollIndex = 0;
+            SaveTags(g_app.tags);
+            SaveLinks(g_app.entries);
+            RequestRender(hwnd);
+        }
         if (result.accepted) {
-            ApplyTagAssignments(result.tag, result.tagAssignments);
+            if (!result.tagCreated) {
+                ApplyTagAssignments(result.tag, result.tagAssignments);
+            }
             if (!result.url.empty()) {
                 AddEntry(result);
             } else {
-                g_app.activeTag = NormalizedTag(result.tag);
+                const std::wstring tag = result.tagCreated ? CreatedTagName(result) : result.tag;
+                AddKnownTag(tag);
+                g_app.activeTag = NormalizedTag(tag);
                 g_app.scrollIndex = 0;
+                SaveTags(g_app.tags);
                 SaveLinks(g_app.entries);
                 RequestRender(hwnd);
             }
@@ -661,7 +756,7 @@ void FinishPress(HWND hwnd, POINT point) {
     }
     case AppState::PressTarget::Card:
         if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && PositionInVisible(g_app.pressEntryIndex) == g_app.scrollIndex) {
-            OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
+            OpenEntry(g_app.entries[g_app.pressEntryIndex]);
         } else if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
             int target = PositionInVisible(g_app.pressEntryIndex);
             int count = static_cast<int>(VisibleEntries().size());
@@ -713,8 +808,8 @@ void ResolveMissingTitles() {
 
 Layout BuildLayout(int width, int height) {
     Layout layout;
-    layout.tagButton = {12, 24, 100, 28};
-    layout.addButton = {std::max(12, width - 44), 24, 28, 28};
+    layout.tagButton = {12, 58, 96, 26};
+    layout.addButton = {112, 58, 26, 26};
 
     std::vector<size_t> visible = VisibleEntries();
     int count = static_cast<int>(visible.size());
@@ -728,7 +823,7 @@ Layout BuildLayout(int width, int height) {
         g_app.scrollIndex = (g_app.scrollIndex % count + count) % count;
     }
 
-    int top = 60;
+    int top = 90;
     int bottom = 12;
     int gap = std::clamp(width / 34, 10, 26);
     int availableWidth = std::max(120, width - 8);
@@ -1027,6 +1122,8 @@ void AddEntry(const AddResult& result) {
     entry.title = ResolveTitle(result.title, result.url);
     entry.url = result.url;
     entry.tag = NormalizedTag(result.tag);
+    entry.preview = result.preview;
+    AddKnownTag(entry.tag);
     entry.thumbnail = LoadThumbnail(entry.url);
     g_app.entries.push_back(std::move(entry));
     g_app.activeTag = NormalizedTag(g_app.entries.back().tag);
@@ -1035,11 +1132,16 @@ void AddEntry(const AddResult& result) {
     g_app.carouselAnimating = false;
     g_app.animationProgress = 0.0;
     SaveLinks(g_app.entries);
+    SaveTags(g_app.tags);
     RequestRender(g_app.window);
 }
 
 void OpenUrl(const std::wstring& url) {
     ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void OpenEntry(const LinkEntry& entry) {
+    OpenUrl(entry.preview ? PreviewUrl(entry.url) : entry.url);
 }
 
 void ScrollBy(int delta) {
@@ -1211,6 +1313,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DESTROY:
         SaveLinks(g_app.entries);
+        SaveTags(g_app.tags);
         SaveCurrentWindowSettings(hwnd);
         PostQuitMessage(0);
         return 0;
@@ -1250,6 +1353,7 @@ int RunApp(HINSTANCE instance, int showCommand) {
     EnableStartup();
     CreateDesktopShortcut();
 
+    g_app.tags = LoadTags();
     g_app.entries = LoadLinks();
     ResolveMissingTitles();
     LoadThumbnails();

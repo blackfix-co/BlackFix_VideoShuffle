@@ -7,4 +7,9 @@
 #include <string>
 #include <vector>
 
-std::vector<size_t> ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector<LinkEntry>& entries, const std::wstring& activeTag);
+struct DeleteResult {
+    std::vector<size_t> indices;
+    std::vector<std::wstring> deletedTags;
+};
+
+DeleteResult ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector<LinkEntry>& entries, const std::vector<std::wstring>& tags, const std::wstring& activeTag);

@@ -14,6 +14,7 @@ constexpr int kUrlEditId = 102;
 constexpr int kTagComboId = 103;
 constexpr int kAddButtonId = 104;
 constexpr int kCancelButtonId = 105;
+constexpr int kPreviewCheckId = 106;
 constexpr wchar_t kTagAddText[] = L"태그 추가";
 constexpr wchar_t kTagDialogClassName[] = L"BlackFixVideoShuffleTagDialog";
 constexpr int kNewTagEditId = 501;
@@ -31,6 +32,7 @@ struct AddDialogState {
     HWND titleEdit{};
     HWND urlEdit{};
     HWND tagCombo{};
+    HWND previewCheck{};
     HFONT font{};
     std::vector<std::wstring> tags;
     std::vector<VideoChoice> videoChoices;
@@ -232,15 +234,17 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         state->urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->input.url.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 82, 60, 260, 28, hwnd, MenuId(kUrlEditId), state->instance, nullptr);
         HWND tagLabel = CreateWindowW(L"STATIC", L"태그", WS_CHILD | WS_VISIBLE, 22, 106, 54, 24, hwnd, nullptr, state->instance, nullptr);
         state->tagCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL, 82, 102, 260, 120, hwnd, MenuId(kTagComboId), state->instance, nullptr);
-        HWND addButton = CreateWindowW(L"BUTTON", state->input.editing ? L"수정" : L"추가", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 176, 150, 78, 30, hwnd, MenuId(kAddButtonId), state->instance, nullptr);
-        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 264, 150, 78, 30, hwnd, MenuId(kCancelButtonId), state->instance, nullptr);
+        state->previewCheck = CreateWindowW(L"BUTTON", L"1분 미리보기 반복", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 82, 136, 170, 24, hwnd, MenuId(kPreviewCheckId), state->instance, nullptr);
+        HWND addButton = CreateWindowW(L"BUTTON", state->input.editing ? L"수정" : L"추가", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 176, 166, 78, 30, hwnd, MenuId(kAddButtonId), state->instance, nullptr);
+        HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 264, 166, 78, 30, hwnd, MenuId(kCancelButtonId), state->instance, nullptr);
         SendMessageW(state->tagCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kTagAddText));
         for (const auto& tag : state->tags) {
             SendMessageW(state->tagCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(tag.c_str()));
         }
         SetWindowTextW(state->tagCombo, state->input.tag.empty() ? L"전체" : state->input.tag.c_str());
         state->previousTag = state->input.tag.empty() ? L"전체" : state->input.tag;
-        for (HWND control : {titleLabel, state->titleEdit, urlLabel, state->urlEdit, tagLabel, state->tagCombo, addButton, cancelButton}) {
+        SendMessageW(state->previewCheck, BM_SETCHECK, state->input.preview ? BST_CHECKED : BST_UNCHECKED, 0);
+        for (HWND control : {titleLabel, state->titleEdit, urlLabel, state->urlEdit, tagLabel, state->tagCombo, state->previewCheck, addButton, cancelButton}) {
             ApplyFont(control, state->font);
         }
         SetFocus(state->titleEdit);
@@ -254,6 +258,10 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 if (tagResult.accepted) {
                     state->newTag = tagResult.tag;
                     state->newTagAssignments = std::move(tagResult.indices);
+                    state->result.tag = state->newTag;
+                    state->result.createdTag = state->newTag;
+                    state->result.tagCreated = true;
+                    state->result.tagAssignments = state->newTagAssignments;
                     if (SendMessageW(state->tagCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(state->newTag.c_str())) == CB_ERR) {
                         SendMessageW(state->tagCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(state->newTag.c_str()));
                     }
@@ -273,13 +281,16 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             state->result.title = Sanitized(ReadWindowText(state->titleEdit));
             state->result.url = Sanitized(ReadWindowText(state->urlEdit));
             state->result.tag = Sanitized(ReadComboText(state->tagCombo));
+            state->result.preview = SendMessageW(state->previewCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             if (state->result.tag == kTagAddText) {
                 state->result.tag = L"전체";
             }
             if (state->result.tag == state->newTag) {
+                state->result.tagCreated = true;
+                state->result.createdTag = state->newTag;
                 state->result.tagAssignments = state->newTagAssignments;
             }
-            if (state->result.url.empty() && state->result.tagAssignments.empty()) {
+            if (state->result.url.empty() && !state->result.tagCreated) {
                 MessageBoxW(hwnd, L"링크를 입력해줘.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
@@ -343,7 +354,7 @@ AddResult ShowVideoDialog(HINSTANCE instance, HWND parent, const std::vector<std
     RECT parentRect{};
     GetWindowRect(parent, &parentRect);
     int width = 370;
-    int height = 220;
+    int height = 236;
     int x = parentRect.left + (parentRect.right - parentRect.left - width) / 2;
     int y = parentRect.top + (parentRect.bottom - parentRect.top - height) / 2;
 
