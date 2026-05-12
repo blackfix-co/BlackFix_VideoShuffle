@@ -59,6 +59,7 @@ Layout BuildLayout(int width, int height);
 void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
+void DeleteIndices(HWND hwnd, std::vector<size_t> indices);
 std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url);
 void RenderWindow(HWND hwnd);
 void RequestRender(HWND hwnd);
@@ -443,12 +444,27 @@ void DeleteFromDialog(HWND hwnd) {
         return;
     }
 
-    size_t index = ShowDeleteDialog(g_app.instance, hwnd, g_app.entries, g_app.activeTag);
-    if (index >= g_app.entries.size()) {
+    std::vector<size_t> indices = ShowDeleteDialog(g_app.instance, hwnd, g_app.entries, g_app.activeTag);
+    if (indices.empty()) {
         return;
     }
 
-    g_app.entries.erase(g_app.entries.begin() + static_cast<std::ptrdiff_t>(index));
+    DeleteIndices(hwnd, std::move(indices));
+}
+
+void DeleteIndices(HWND hwnd, std::vector<size_t> indices) {
+    if (indices.empty()) {
+        return;
+    }
+
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
+        if (*it < g_app.entries.size()) {
+            g_app.entries.erase(g_app.entries.begin() + static_cast<std::ptrdiff_t>(*it));
+        }
+    }
+
     std::vector<size_t> visible = VisibleEntries();
     if (visible.empty()) {
         g_app.scrollIndex = 0;
@@ -457,6 +473,19 @@ void DeleteFromDialog(HWND hwnd) {
     }
     SaveLinks(g_app.entries);
     RequestRender(hwnd);
+}
+
+void DeleteActiveTag(HWND hwnd) {
+    std::vector<size_t> indices = VisibleEntries();
+    if (indices.empty()) {
+        MessageBoxW(hwnd, L"현재 태그에 삭제할 영상이 없습니다.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wstring messageText = g_app.activeTag + L" 태그의 " + std::to_wstring(indices.size()) + L"개 영상을 모두 지우시겠습니까?";
+    if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+        DeleteIndices(hwnd, std::move(indices));
+    }
 }
 
 size_t CardAt(HWND hwnd, POINT point) {
@@ -512,6 +541,7 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     constexpr UINT resizeId = 4103;
     constexpr UINT deleteId = 4104;
     constexpr UINT closeId = 4105;
+    constexpr UINT deleteTagId = 4106;
 
     size_t cardIndex = CardAt(hwnd, clientPoint);
     if (cardIndex < g_app.entries.size()) {
@@ -521,6 +551,7 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, moveId, L"위치 이동");
     AppendMenuW(menu, MF_STRING, resizeId, L"크기 조절");
     AppendMenuW(menu, g_app.entries.empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteId, L"지우기");
+    AppendMenuW(menu, VisibleEntries().empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteTagId, L"현재 태그 전체 지우기");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, closeId, L"끄기");
 
@@ -545,6 +576,9 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
         break;
     case deleteId:
         DeleteFromDialog(hwnd);
+        break;
+    case deleteTagId:
+        DeleteActiveTag(hwnd);
         break;
     case closeId:
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -745,23 +779,29 @@ struct TitleLayout {
 
 TitleLayout BuildTitleLayout(Graphics& graphics, const RectI& rect, const std::wstring& title, bool active) {
     int baseHeight = std::clamp(rect.h / 6, 34, 72);
-    int maxHeight = std::clamp(rect.h * 3 / 4, baseHeight, std::max(baseHeight, rect.h - 8));
+    int maxHeight = std::max(baseHeight, rect.h - 4);
     int horizontalPadding = std::clamp(rect.w / 14, 8, 22);
     float preferredSize = std::clamp(static_cast<float>(baseHeight) * (active ? 0.42f : 0.38f), 12.0f, 26.0f);
-    float minimumSize = std::clamp(static_cast<float>(rect.w) / 18.0f, 6.0f, 10.0f);
+    float minimumSize = 5.0f;
 
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentNear);
     format.SetTrimming(StringTrimmingNone);
 
-    int fittedHeight = baseHeight;
-    for (int height = baseHeight; height <= maxHeight; height += 4) {
+    int probePadding = std::clamp(baseHeight / 9, 3, 10);
+    RectF probeBounds(0.0f, 0.0f, static_cast<float>(std::max(1, rect.w - horizontalPadding * 2)), 4096.0f);
+    Font preferredFont(L"Malgun Gothic", preferredSize, FontStyleRegular, UnitPixel);
+    RectF measured;
+    graphics.MeasureString(title.c_str(), -1, &preferredFont, probeBounds, &format, &measured);
+    int measuredHeight = static_cast<int>(measured.Height + 0.999f) + probePadding * 2;
+    int fittedHeight = std::clamp(measuredHeight, baseHeight, maxHeight);
+
+    for (int height = fittedHeight; height <= maxHeight; height += 4) {
         int verticalPadding = std::clamp(height / 9, 3, 10);
         RectF bounds(static_cast<float>(rect.x + horizontalPadding), static_cast<float>(rect.y + rect.h - height + verticalPadding), static_cast<float>(std::max(1, rect.w - horizontalPadding * 2)), static_cast<float>(std::max(1, height - verticalPadding * 2)));
         if (TextFits(graphics, title, bounds, preferredSize, format)) {
-            fittedHeight = height;
-            return {{rect.x, rect.y + rect.h - fittedHeight, rect.w, fittedHeight}, bounds, preferredSize};
+            return {{rect.x, rect.y + rect.h - height, rect.w, height}, bounds, preferredSize};
         }
         fittedHeight = height;
     }
@@ -777,7 +817,7 @@ void DrawTitleText(Graphics& graphics, const std::wstring& title, const TitleLay
     SolidBrush brush(Color(255, 245, 248, 252));
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentNear);
     format.SetTrimming(StringTrimmingNone);
     graphics.DrawString(title.c_str(), -1, &font, layout.textBounds, &format, &brush);
 }

@@ -50,12 +50,17 @@ std::wstring YoutubeVideoId(const std::wstring& url) {
     return {};
 }
 
-std::wstring ThumbnailUrlFor(const std::wstring& url) {
+std::vector<std::wstring> ThumbnailUrlsFor(const std::wstring& url) {
     std::wstring id = YoutubeVideoId(url);
     if (id.empty()) {
         return {};
     }
-    return L"https://img.youtube.com/vi/" + id + L"/hqdefault.jpg";
+    std::wstring base = L"https://img.youtube.com/vi/" + id + L"/";
+    return {
+        base + L"maxresdefault.jpg",
+        base + L"sddefault.jpg",
+        base + L"hqdefault.jpg"
+    };
 }
 
 std::unique_ptr<Gdiplus::Bitmap> BitmapFromBytes(const std::vector<unsigned char>& bytes) {
@@ -100,9 +105,15 @@ std::unique_ptr<Gdiplus::Bitmap> BitmapFromBytes(const std::vector<unsigned char
 }
 
 std::unique_ptr<Gdiplus::Bitmap> LoadThumbnail(const std::wstring& url) {
-    std::wstring imageUrl = ThumbnailUrlFor(url);
-    if (imageUrl.empty()) {
-        return {};
+    std::unique_ptr<Gdiplus::Bitmap> fallback;
+    for (const auto& imageUrl : ThumbnailUrlsFor(url)) {
+        std::unique_ptr<Gdiplus::Bitmap> image = BitmapFromBytes(DownloadBytes(imageUrl));
+        if (image) {
+            if (image->GetWidth() >= 640 || image->GetHeight() >= 360) {
+                return image;
+            }
+            fallback = std::move(image);
+        }
     }
-    return BitmapFromBytes(DownloadBytes(imageUrl));
+    return fallback;
 }
