@@ -18,6 +18,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cwctype>
+#include <filesystem>
+#include <fstream>
 
 using namespace Gdiplus;
 
@@ -218,6 +220,13 @@ RectI UnionRect(const RectI& left, const RectI& right) {
 
 RectI VisibleContentBounds(int width, int height) {
     Layout layout = BuildLayout(width, height);
+    auto activeCard = std::find_if(layout.cards.begin(), layout.cards.end(), [](const CardLayout& card) {
+        return card.active;
+    });
+    if (activeCard != layout.cards.end()) {
+        return UnionRect(activeCard->rect, layout.tagButton);
+    }
+
     RectI bounds = layout.tagButton;
     bool hasBounds = bounds.w > 0 && bounds.h > 0;
     for (const auto& card : layout.cards) {
@@ -412,7 +421,37 @@ std::wstring PreviewUrl(const std::wstring& url) {
     if (id.empty()) {
         return url;
     }
-    return L"https://www.youtube.com/embed/" + id + L"?autoplay=1&loop=1&playlist=" + id + L"&start=0&end=60";
+    return L"https://www.youtube.com/watch?v=" + id + L"&autoplay=1&mute=1&loop=1&playlist=" + id + L"&start=0&end=60";
+}
+
+bool OpenPreviewPlayer(const std::wstring& url) {
+    std::wstring id = YoutubeVideoId(url);
+    if (id.empty()) {
+        return false;
+    }
+
+    std::wstring source = L"https://www.youtube.com/embed/" + id + L"?autoplay=1&mute=1&loop=1&playlist=" + id + L"&start=0&end=60&playsinline=1&rel=0";
+    std::wstring html =
+        LR"(<!doctype html><html><head><meta charset="utf-8"><title>BlackFix VideoShuffle Preview</title><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;inset:0;width:100%;height:100%;border:0}</style></head><body><iframe id="player" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen src=")" +
+        source +
+        LR"("></iframe><script>const player=document.getElementById('player');const base=player.src;setInterval(()=>{player.src=base+'&reload='+Date.now();},60000);</script></body></html>)";
+
+    try {
+        std::filesystem::path path = std::filesystem::temp_directory_path() / (L"BlackFix_VideoShuffle_preview_" + id + L".html");
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            return false;
+        }
+        std::string bytes = ToUtf8(html);
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!file) {
+            return false;
+        }
+        ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 std::vector<size_t> VisibleEntries() {
@@ -1200,6 +1239,9 @@ void OpenUrl(const std::wstring& url) {
 }
 
 void OpenEntry(const LinkEntry& entry) {
+    if (entry.preview && OpenPreviewPlayer(entry.url)) {
+        return;
+    }
     OpenUrl(entry.preview ? PreviewUrl(entry.url) : entry.url);
 }
 
