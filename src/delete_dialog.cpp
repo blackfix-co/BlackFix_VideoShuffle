@@ -14,6 +14,9 @@ constexpr int kTagCheckBaseId = 3100;
 constexpr int kContentTop = 16;
 constexpr int kContentBottom = 386;
 constexpr int kContentLeft = 16;
+constexpr COLORREF kDarkBackground = RGB(24, 26, 32);
+constexpr COLORREF kDarkPanel = RGB(34, 37, 45);
+constexpr COLORREF kDarkText = RGB(255, 255, 255);
 
 struct DeleteChoice {
     size_t index{};
@@ -25,6 +28,7 @@ struct ItemControl {
     size_t index{};
     std::wstring tag;
     HWND check{};
+    int x{};
     int y{};
 };
 
@@ -38,6 +42,8 @@ struct DeleteDialogState {
     HINSTANCE instance{};
     HWND rootCheck{};
     HFONT font{};
+    HBRUSH backgroundBrush{};
+    HBRUSH panelBrush{};
     std::vector<DeleteChoice> choices;
     std::vector<std::wstring> tagOrder;
     std::vector<TagControl> tags;
@@ -53,6 +59,14 @@ HMENU MenuId(int value) {
 
 void ApplyFont(HWND hwnd, HFONT font) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+HBRUSH ApplyControlColors(WPARAM wParam, HBRUSH brush, COLORREF background) {
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    SetTextColor(dc, kDarkText);
+    SetBkColor(dc, background);
+    SetBkMode(dc, TRANSPARENT);
+    return brush;
 }
 
 std::wstring NormalizedTagName(const LinkEntry& entry) {
@@ -79,7 +93,7 @@ void LayoutDeleteControls(HWND hwnd, DeleteDialogState* state) {
         MoveScrolled(tag.check, kContentLeft + 18, tag.y, 420, 24, state->scrollOffset);
     }
     for (const auto& item : state->items) {
-        MoveScrolled(item.check, kContentLeft + 42, item.y, 420, 24, state->scrollOffset);
+        MoveScrolled(item.check, kContentLeft + item.x, item.y, 420, 24, state->scrollOffset);
     }
 
     SCROLLINFO info{};
@@ -157,12 +171,14 @@ std::vector<std::wstring> AllTagNames(DeleteDialogState* state) {
 }
 
 void ConfirmAndClose(HWND hwnd, DeleteDialogState* state, std::vector<size_t> indices, std::vector<std::wstring> deletedTags = {}) {
-    if (indices.empty()) {
+    if (indices.empty() && deletedTags.empty()) {
         MessageBoxW(hwnd, L"지울 영상을 선택해줘.", L"BlackFix VideoShuffle", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
-    std::wstring messageText = std::to_wstring(indices.size()) + L"개 영상을 정말 지우시겠습니까?";
+    std::wstring messageText = indices.empty()
+        ? std::to_wstring(deletedTags.size()) + L"개 태그를 정말 지우시겠습니까?"
+        : std::to_wstring(indices.size()) + L"개 영상을 정말 지우시겠습니까?";
     if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
         state->result.indices = std::move(indices);
         state->result.deletedTags = std::move(deletedTags);
@@ -193,8 +209,22 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
     ApplyFont(state->rootCheck, state->font);
     y += 30;
 
+    for (const auto& choice : state->choices) {
+        if (choice.tag != L"전체") {
+            continue;
+        }
+        std::wstring itemLabel = L"- " + choice.label;
+        HWND itemCheck = CreateWindowW(L"BUTTON", itemLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
+        ApplyFont(itemCheck, state->font);
+        state->items.push_back({choice.index, choice.tag, itemCheck, 18, y});
+        y += 26;
+    }
+
     size_t tagIndex = 0;
     for (const auto& tagName : state->tagOrder) {
+        if (tagName == L"전체") {
+            continue;
+        }
         std::wstring label = L"- " + tagName;
         HWND tagCheck = CreateWindowW(L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_NOTIFY, 0, 0, 1, 1, hwnd, MenuId(kTagCheckBaseId + static_cast<int>(tagIndex)), state->instance, nullptr);
         ApplyFont(tagCheck, state->font);
@@ -210,7 +240,7 @@ void CreateTreeControls(HWND hwnd, DeleteDialogState* state) {
             std::wstring itemLabel = L"- " + choice.label;
             HWND itemCheck = CreateWindowW(L"BUTTON", itemLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 1, 1, hwnd, nullptr, state->instance, nullptr);
             ApplyFont(itemCheck, state->font);
-            state->items.push_back({choice.index, choice.tag, itemCheck, y});
+            state->items.push_back({choice.index, choice.tag, itemCheck, 42, y});
             y += 26;
         }
     }
@@ -230,6 +260,8 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     switch (message) {
     case WM_CREATE: {
         state->font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
+        state->backgroundBrush = CreateSolidBrush(kDarkBackground);
+        state->panelBrush = CreateSolidBrush(kDarkPanel);
         HWND okButton = CreateWindowW(L"BUTTON", L"지우기", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 338, 400, 78, 30, hwnd, MenuId(kOkId), state->instance, nullptr);
         HWND cancelButton = CreateWindowW(L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE, 426, 400, 78, 30, hwnd, MenuId(kCancelId), state->instance, nullptr);
         ApplyFont(okButton, state->font);
@@ -237,6 +269,14 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         CreateTreeControls(hwnd, state);
         return 0;
     }
+    case WM_CTLCOLORDLG:
+        return reinterpret_cast<LRESULT>(state && state->backgroundBrush ? state->backgroundBrush : GetStockObject(BLACK_BRUSH));
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->backgroundBrush ? state->backgroundBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkBackground));
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
@@ -309,6 +349,14 @@ LRESULT CALLBACK DeleteDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
             DeleteObject(state->font);
             state->font = nullptr;
         }
+        if (state && state->backgroundBrush) {
+            DeleteObject(state->backgroundBrush);
+            state->backgroundBrush = nullptr;
+        }
+        if (state && state->panelBrush) {
+            DeleteObject(state->panelBrush);
+            state->panelBrush = nullptr;
+        }
         return 0;
     default:
         break;
@@ -359,7 +407,7 @@ DeleteResult ShowDeleteDialog(HINSTANCE instance, HWND parent, const std::vector
 
     auto addTag = [&state](const std::wstring& tag) {
         std::wstring clean = tag.empty() ? L"전체" : tag;
-        if (std::find(state.tagOrder.begin(), state.tagOrder.end(), clean) == state.tagOrder.end()) {
+        if (clean != L"전체" && std::find(state.tagOrder.begin(), state.tagOrder.end(), clean) == state.tagOrder.end()) {
             state.tagOrder.push_back(clean);
         }
     };

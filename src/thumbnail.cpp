@@ -58,6 +58,7 @@ std::vector<std::wstring> ThumbnailUrlsFor(const std::wstring& url) {
     std::wstring base = L"https://img.youtube.com/vi/" + id + L"/";
     return {
         base + L"maxresdefault.jpg",
+        L"https://i.ytimg.com/vi/" + id + L"/hq720.jpg",
         base + L"sddefault.jpg",
         base + L"hqdefault.jpg"
     };

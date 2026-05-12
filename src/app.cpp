@@ -54,7 +54,6 @@ struct AppState {
     enum class PressTarget {
         None,
         Tag,
-        Add,
         Card,
         Move,
         Resize
@@ -69,6 +68,7 @@ void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
 void OpenEntry(const LinkEntry& entry);
+void AddFromDialog(HWND hwnd);
 void DeleteIndices(HWND hwnd, std::vector<size_t> indices);
 void ApplyTagAssignments(const std::wstring& tag, const std::vector<size_t>& indices);
 void RemoveKnownTags(const std::vector<std::wstring>& tags);
@@ -382,9 +382,6 @@ AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryI
     if (ContainsExpanded(layout.tagButton, point, 8)) {
         return AppState::PressTarget::Tag;
     }
-    if (ContainsExpanded(layout.addButton, point, 10)) {
-        return AppState::PressTarget::Add;
-    }
     for (const auto& card : layout.cards) {
         if (ContainsExpanded(card.rect, point, 8)) {
             entryIndex = card.entryIndex;
@@ -398,8 +395,6 @@ bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget 
     switch (target) {
     case AppState::PressTarget::Tag:
         return ContainsExpanded(layout.tagButton, point, 8);
-    case AppState::PressTarget::Add:
-        return ContainsExpanded(layout.addButton, point, 10);
     case AppState::PressTarget::Move:
     case AppState::PressTarget::Resize:
         return true;
@@ -652,19 +647,54 @@ void EditEntry(HWND hwnd, size_t index) {
     RequestRender(hwnd);
 }
 
+void AddFromDialog(HWND hwnd) {
+    VideoDialogInput input;
+    input.tag = g_app.activeTag;
+    AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
+    if (result.tagCreated) {
+        ApplyTagAssignments(CreatedTagName(result), result.tagAssignments);
+        g_app.activeTag = NormalizedTag(CreatedTagName(result));
+        g_app.scrollIndex = 0;
+        SaveTags(g_app.tags);
+        SaveLinks(g_app.entries);
+        RequestRender(hwnd);
+    }
+    if (!result.accepted) {
+        return;
+    }
+    if (!result.tagCreated) {
+        ApplyTagAssignments(result.tag, result.tagAssignments);
+    }
+    if (!result.url.empty()) {
+        AddEntry(result);
+        return;
+    }
+
+    const std::wstring tag = result.tagCreated ? CreatedTagName(result) : result.tag;
+    AddKnownTag(tag);
+    g_app.activeTag = NormalizedTag(tag);
+    g_app.scrollIndex = 0;
+    SaveTags(g_app.tags);
+    SaveLinks(g_app.entries);
+    RequestRender(hwnd);
+}
+
 void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     if (!menu) {
         return;
     }
 
-    constexpr UINT editId = 4101;
-    constexpr UINT moveId = 4102;
-    constexpr UINT resizeId = 4103;
-    constexpr UINT deleteId = 4104;
-    constexpr UINT closeId = 4105;
+    constexpr UINT addId = 4101;
+    constexpr UINT editId = 4102;
+    constexpr UINT moveId = 4103;
+    constexpr UINT resizeId = 4104;
+    constexpr UINT deleteId = 4105;
+    constexpr UINT closeId = 4106;
 
     size_t cardIndex = CardAt(hwnd, clientPoint);
+    AppendMenuW(menu, MF_STRING, addId, L"+");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     if (cardIndex < g_app.entries.size()) {
         AppendMenuW(menu, MF_STRING, editId, L"영상 수정");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -681,6 +711,9 @@ void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
     g_app.armedTarget = AppState::PressTarget::None;
 
     switch (command) {
+    case addId:
+        AddFromDialog(hwnd);
+        break;
     case editId:
         if (cardIndex < g_app.entries.size()) {
             EditEntry(hwnd, cardIndex);
@@ -724,36 +757,6 @@ void FinishPress(HWND hwnd, POINT point) {
     case AppState::PressTarget::Tag:
         ShowTagMenu(hwnd);
         break;
-    case AppState::PressTarget::Add: {
-        VideoDialogInput input;
-        input.tag = g_app.activeTag;
-        AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
-        if (result.tagCreated) {
-            ApplyTagAssignments(CreatedTagName(result), result.tagAssignments);
-            g_app.activeTag = NormalizedTag(CreatedTagName(result));
-            g_app.scrollIndex = 0;
-            SaveTags(g_app.tags);
-            SaveLinks(g_app.entries);
-            RequestRender(hwnd);
-        }
-        if (result.accepted) {
-            if (!result.tagCreated) {
-                ApplyTagAssignments(result.tag, result.tagAssignments);
-            }
-            if (!result.url.empty()) {
-                AddEntry(result);
-            } else {
-                const std::wstring tag = result.tagCreated ? CreatedTagName(result) : result.tag;
-                AddKnownTag(tag);
-                g_app.activeTag = NormalizedTag(tag);
-                g_app.scrollIndex = 0;
-                SaveTags(g_app.tags);
-                SaveLinks(g_app.entries);
-                RequestRender(hwnd);
-            }
-        }
-        break;
-    }
     case AppState::PressTarget::Card:
         if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && PositionInVisible(g_app.pressEntryIndex) == g_app.scrollIndex) {
             OpenEntry(g_app.entries[g_app.pressEntryIndex]);
@@ -808,8 +811,7 @@ void ResolveMissingTitles() {
 
 Layout BuildLayout(int width, int height) {
     Layout layout;
-    layout.tagButton = {12, 58, 96, 26};
-    layout.addButton = {112, 58, 26, 26};
+    layout.tagButton = {12, 82, 96, 26};
 
     std::vector<size_t> visible = VisibleEntries();
     int count = static_cast<int>(visible.size());
@@ -902,6 +904,14 @@ Layout BuildLayout(int width, int height) {
         layout.cards.push_back({wrapIndex(g_app.scrollIndex), {centerX, centerY, centerWidth, centerHeight}, true});
     }
 
+    auto activeCard = std::find_if(layout.cards.begin(), layout.cards.end(), [](const CardLayout& card) {
+        return card.active;
+    });
+    if (activeCard != layout.cards.end()) {
+        int tagWidth = std::clamp(42 + static_cast<int>(g_app.activeTag.size()) * 9, 74, std::min(170, activeCard->rect.w));
+        layout.tagButton = {activeCard->rect.x, activeCard->rect.y, tagWidth, 26};
+    }
+
     return layout;
 }
 
@@ -988,7 +998,7 @@ void DrawTitleText(Graphics& graphics, const std::wstring& title, const TitleLay
 
 void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry) {
     const RectI& rect = card.rect;
-    SolidBrush fallback(card.active ? Color(255, 128, 128, 128) : Color(255, 112, 112, 112));
+    SolidBrush fallback(card.active ? Color(255, 42, 46, 56) : Color(255, 30, 33, 40));
     graphics.FillRectangle(&fallback, rect.x, rect.y, rect.w, rect.h);
 
     if (entry.thumbnail) {
@@ -1006,25 +1016,15 @@ void DrawCard(Graphics& graphics, const CardLayout& card, const LinkEntry& entry
 
     std::wstring title = entry.title.empty() ? L"제목 없음" : entry.title;
     TitleLayout titleLayout = BuildTitleLayout(graphics, rect, title, card.active);
-    SolidBrush titleBrush(card.active ? Color(255, 92, 109, 132) : Color(255, 84, 95, 112));
+    SolidBrush titleBrush(card.active ? Color(235, 18, 20, 26) : Color(220, 16, 18, 24));
     graphics.FillRectangle(&titleBrush, titleLayout.bar.x, titleLayout.bar.y, titleLayout.bar.w, titleLayout.bar.h);
     DrawTitleText(graphics, title, titleLayout);
 }
 
-void DrawAddButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(190, 110, 126, 150));
-    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(220, 0, 0, 0), 3.0f);
-    float cx = static_cast<float>(rect.x + rect.w / 2);
-    float cy = static_cast<float>(rect.y + rect.h / 2);
-    graphics.DrawLine(&pen, cx - 8.0f, cy, cx + 8.0f, cy);
-    graphics.DrawLine(&pen, cx, cy - 8.0f, cx, cy + 8.0f);
-}
-
 void DrawTagButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(190, 110, 126, 150));
+    SolidBrush brush(Color(210, 24, 28, 34));
     graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(230, 0, 0, 0), StringAlignmentCenter);
+    DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(255, 255, 255, 255), StringAlignmentCenter);
 }
 
 void RenderWindow(HWND hwnd) {
@@ -1082,8 +1082,10 @@ void RenderWindow(HWND hwnd) {
         graphics.SetCompositingMode(CompositingModeSourceCopy);
         graphics.Clear(Color(0, 0, 0, 0));
         graphics.SetCompositingMode(CompositingModeSourceOver);
+        graphics.SetCompositingQuality(CompositingQualityHighQuality);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 
         Layout layout = BuildLayout(width, height);
@@ -1091,7 +1093,6 @@ void RenderWindow(HWND hwnd) {
             DrawCard(graphics, card, g_app.entries[card.entryIndex]);
         }
         DrawTagButton(graphics, layout.tagButton);
-        DrawAddButton(graphics, layout.addButton);
         graphics.Flush(FlushIntentionFlush);
     }
 

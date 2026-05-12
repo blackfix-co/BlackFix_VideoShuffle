@@ -21,6 +21,9 @@ constexpr int kNewTagEditId = 501;
 constexpr int kNewTagListId = 502;
 constexpr int kNewTagOkId = 503;
 constexpr int kNewTagCancelId = 504;
+constexpr COLORREF kDarkBackground = RGB(24, 26, 32);
+constexpr COLORREF kDarkPanel = RGB(34, 37, 45);
+constexpr COLORREF kDarkText = RGB(255, 255, 255);
 
 struct VideoChoice {
     size_t index{};
@@ -34,6 +37,8 @@ struct AddDialogState {
     HWND tagCombo{};
     HWND previewCheck{};
     HFONT font{};
+    HBRUSH backgroundBrush{};
+    HBRUSH panelBrush{};
     std::vector<std::wstring> tags;
     std::vector<VideoChoice> videoChoices;
     VideoDialogInput input;
@@ -54,6 +59,8 @@ struct NewTagDialogState {
     HWND edit{};
     HWND list{};
     HFONT font{};
+    HBRUSH backgroundBrush{};
+    HBRUSH panelBrush{};
     std::vector<VideoChoice> choices;
     NewTagResult result;
 };
@@ -72,6 +79,14 @@ std::wstring ReadComboText(HWND hwnd) {
 
 void ApplyFont(HWND hwnd, HFONT font) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+HBRUSH ApplyControlColors(WPARAM wParam, HBRUSH brush, COLORREF background) {
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    SetTextColor(dc, kDarkText);
+    SetBkColor(dc, background);
+    SetBkMode(dc, TRANSPARENT);
+    return brush;
 }
 
 HMENU MenuId(int value) {
@@ -114,6 +129,8 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     switch (message) {
     case WM_CREATE: {
         state->font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
+        state->backgroundBrush = CreateSolidBrush(kDarkBackground);
+        state->panelBrush = CreateSolidBrush(kDarkPanel);
         HWND label = CreateWindowW(L"STATIC", L"새 태그", WS_CHILD | WS_VISIBLE, 18, 18, 64, 24, hwnd, nullptr, state->instance, nullptr);
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 84, 14, 278, 28, hwnd, MenuId(kNewTagEditId), state->instance, nullptr);
         HWND listLabel = CreateWindowW(L"STATIC", L"넣을 영상", WS_CHILD | WS_VISIBLE, 18, 56, 86, 24, hwnd, nullptr, state->instance, nullptr);
@@ -129,6 +146,14 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         SetFocus(state->edit);
         return 0;
     }
+    case WM_CTLCOLORDLG:
+        return reinterpret_cast<LRESULT>(state && state->backgroundBrush ? state->backgroundBrush : GetStockObject(BLACK_BRUSH));
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->backgroundBrush ? state->backgroundBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkBackground));
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case kNewTagOkId:
@@ -157,6 +182,14 @@ LRESULT CALLBACK NewTagDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         if (state && state->font) {
             DeleteObject(state->font);
             state->font = nullptr;
+        }
+        if (state && state->backgroundBrush) {
+            DeleteObject(state->backgroundBrush);
+            state->backgroundBrush = nullptr;
+        }
+        if (state && state->panelBrush) {
+            DeleteObject(state->panelBrush);
+            state->panelBrush = nullptr;
         }
         return 0;
     default:
@@ -228,6 +261,8 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     switch (message) {
     case WM_CREATE: {
         state->font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
+        state->backgroundBrush = CreateSolidBrush(kDarkBackground);
+        state->panelBrush = CreateSolidBrush(kDarkPanel);
         HWND titleLabel = CreateWindowW(L"STATIC", L"제목", WS_CHILD | WS_VISIBLE, 22, 22, 54, 24, hwnd, nullptr, state->instance, nullptr);
         state->titleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->input.title.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 82, 18, 260, 28, hwnd, MenuId(kTitleEditId), state->instance, nullptr);
         HWND urlLabel = CreateWindowW(L"STATIC", L"링크", WS_CHILD | WS_VISIBLE, 22, 64, 54, 24, hwnd, nullptr, state->instance, nullptr);
@@ -250,6 +285,14 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         SetFocus(state->titleEdit);
         return 0;
     }
+    case WM_CTLCOLORDLG:
+        return reinterpret_cast<LRESULT>(state && state->backgroundBrush ? state->backgroundBrush : GetStockObject(BLACK_BRUSH));
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->backgroundBrush ? state->backgroundBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkBackground));
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return reinterpret_cast<LRESULT>(ApplyControlColors(wParam, state && state->panelBrush ? state->panelBrush : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), kDarkPanel));
     case WM_COMMAND:
         if (LOWORD(wParam) == kTagComboId && HIWORD(wParam) == CBN_SELCHANGE) {
             int selection = static_cast<int>(SendMessageW(state->tagCombo, CB_GETCURSEL, 0, 0));
@@ -315,6 +358,14 @@ LRESULT CALLBACK AddDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         if (state && state->font) {
             DeleteObject(state->font);
             state->font = nullptr;
+        }
+        if (state && state->backgroundBrush) {
+            DeleteObject(state->backgroundBrush);
+            state->backgroundBrush = nullptr;
+        }
+        if (state && state->panelBrush) {
+            DeleteObject(state->panelBrush);
+            state->panelBrush = nullptr;
         }
         return 0;
     default:

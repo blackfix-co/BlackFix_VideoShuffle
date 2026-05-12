@@ -44,7 +44,6 @@ struct CardLayout {
 
 struct Layout {
     RectI tagButton;
-    RectI addButton;
     int visibleSlots{};
     std::vector<CardLayout> cards;
 };
