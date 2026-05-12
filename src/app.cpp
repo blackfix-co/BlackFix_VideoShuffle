@@ -46,11 +46,11 @@ struct AppState {
         None,
         Tag,
         Add,
-        Delete,
         Card,
         Move,
         Resize
     } pressTarget{PressTarget::None};
+    PressTarget armedTarget{PressTarget::None};
 };
 
 AppState g_app;
@@ -144,6 +144,28 @@ void CreateDesktopShortcut() {
     }
 }
 
+RECT VirtualScreenRect() {
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    return {screenX, screenY, screenX + screenW, screenY + screenH};
+}
+
+POINT ClampedPosition(int x, int y, int width, int height) {
+    RECT screen = VirtualScreenRect();
+    int screenW = screen.right - screen.left;
+    int screenH = screen.bottom - screen.top;
+    POINT result{x, y};
+    int left = static_cast<int>(screen.left);
+    int top = static_cast<int>(screen.top);
+    int right = static_cast<int>(screen.right);
+    int bottom = static_cast<int>(screen.bottom);
+    result.x = width >= screenW ? left : std::clamp(x, left, right - width);
+    result.y = height >= screenH ? top : std::clamp(y, top, bottom - height);
+    return result;
+}
+
 WindowSettings DefaultWindowSettings() {
     int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -163,28 +185,14 @@ WindowSettings EnsureVisible(WindowSettings settings) {
         return DefaultWindowSettings();
     }
 
-    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    RECT screen = VirtualScreenRect();
+    int screenW = screen.right - screen.left;
+    int screenH = screen.bottom - screen.top;
     settings.width = std::clamp(settings.width, 280, std::max(280, screenW));
     settings.height = std::clamp(settings.height, 180, std::max(180, screenH));
-
-    RECT window{settings.x, settings.y, settings.x + settings.width, settings.y + settings.height};
-    RECT screen{screenX, screenY, screenX + screenW, screenY + screenH};
-    RECT intersection{};
-    if (!IntersectRect(&intersection, &window, &screen)) {
-        return DefaultWindowSettings();
-    }
-
-    int visibleWidth = intersection.right - intersection.left;
-    int visibleHeight = intersection.bottom - intersection.top;
-    if (visibleWidth < 80 || visibleHeight < 80) {
-        return DefaultWindowSettings();
-    }
-
-    settings.x = std::clamp(settings.x, screenX - settings.width + 80, screenX + screenW - 80);
-    settings.y = std::clamp(settings.y, screenY - settings.height + 80, screenY + screenH - 80);
+    POINT position = ClampedPosition(settings.x, settings.y, settings.width, settings.height);
+    settings.x = position.x;
+    settings.y = position.y;
     return settings;
 }
 
@@ -270,20 +278,14 @@ int PositionInVisible(size_t entryIndex) {
 }
 
 AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryIndex) {
+    if (g_app.armedTarget == AppState::PressTarget::Move || g_app.armedTarget == AppState::PressTarget::Resize) {
+        return g_app.armedTarget;
+    }
     if (ContainsExpanded(layout.tagButton, point, 8)) {
         return AppState::PressTarget::Tag;
     }
     if (ContainsExpanded(layout.addButton, point, 10)) {
         return AppState::PressTarget::Add;
-    }
-    if (ContainsExpanded(layout.deleteButton, point, 10)) {
-        return AppState::PressTarget::Delete;
-    }
-    if (ContainsExpanded(layout.moveHandle, point, 14)) {
-        return AppState::PressTarget::Move;
-    }
-    if (ContainsExpanded(layout.resizeHandle, point, 16)) {
-        return AppState::PressTarget::Resize;
     }
     for (const auto& card : layout.cards) {
         if (ContainsExpanded(card.rect, point, 8)) {
@@ -300,12 +302,9 @@ bool TargetStillActive(const Layout& layout, POINT point, AppState::PressTarget 
         return ContainsExpanded(layout.tagButton, point, 8);
     case AppState::PressTarget::Add:
         return ContainsExpanded(layout.addButton, point, 10);
-    case AppState::PressTarget::Delete:
-        return ContainsExpanded(layout.deleteButton, point, 10);
     case AppState::PressTarget::Move:
-        return ContainsExpanded(layout.moveHandle, point, 14);
     case AppState::PressTarget::Resize:
-        return ContainsExpanded(layout.resizeHandle, point, 16);
+        return true;
     case AppState::PressTarget::Card:
         for (const auto& card : layout.cards) {
             if (card.entryIndex == entryIndex && ContainsExpanded(card.rect, point, 8)) {
@@ -338,7 +337,8 @@ void MoveWindowFromDrag(HWND hwnd, POINT screenPoint) {
     }
     int width = g_app.pressWindow.right - g_app.pressWindow.left;
     int height = g_app.pressWindow.bottom - g_app.pressWindow.top;
-    SetWindowPos(hwnd, nullptr, g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    POINT position = ClampedPosition(g_app.pressWindow.left + dx, g_app.pressWindow.top + dy, width, height);
+    SetWindowPos(hwnd, nullptr, position.x, position.y, width, height, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     RequestRender(hwnd);
 }
 
@@ -353,9 +353,23 @@ void ResizeWindowFromDrag(HWND hwnd, POINT screenPoint) {
     int originalHeight = g_app.pressWindow.bottom - g_app.pressWindow.top;
     int minWidth = 280;
     int minHeight = 180;
-    int newWidth = std::max(minWidth, originalWidth + dx);
-    int newHeight = std::max(minHeight, originalHeight + dy);
-    SetWindowPos(hwnd, nullptr, g_app.pressWindow.left, g_app.pressWindow.top, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    double widthScale = static_cast<double>(std::max(minWidth, originalWidth + dx)) / static_cast<double>(originalWidth);
+    double heightScale = static_cast<double>(std::max(minHeight, originalHeight + dy)) / static_cast<double>(originalHeight);
+    double scale = std::abs(widthScale - 1.0) >= std::abs(heightScale - 1.0) ? widthScale : heightScale;
+
+    RECT screen = VirtualScreenRect();
+    POINT anchor = ClampedPosition(g_app.pressWindow.left, g_app.pressWindow.top, originalWidth, originalHeight);
+    int anchorX = static_cast<int>(anchor.x);
+    int anchorY = static_cast<int>(anchor.y);
+    int maxWidth = std::max(minWidth, static_cast<int>(screen.right) - anchorX);
+    int maxHeight = std::max(minHeight, static_cast<int>(screen.bottom) - anchorY);
+    double minScale = std::max(static_cast<double>(minWidth) / originalWidth, static_cast<double>(minHeight) / originalHeight);
+    double maxScale = std::min(static_cast<double>(maxWidth) / originalWidth, static_cast<double>(maxHeight) / originalHeight);
+    scale = std::clamp(scale, minScale, std::max(minScale, maxScale));
+
+    int newWidth = std::max(minWidth, static_cast<int>(originalWidth * scale));
+    int newHeight = std::max(minHeight, static_cast<int>(originalHeight * scale));
+    SetWindowPos(hwnd, nullptr, anchorX, anchorY, newWidth, newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
     RequestRender(hwnd);
 }
 
@@ -445,6 +459,18 @@ void DeleteFromDialog(HWND hwnd) {
     RequestRender(hwnd);
 }
 
+size_t CardAt(HWND hwnd, POINT point) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
+    for (const auto& card : layout.cards) {
+        if (ContainsExpanded(card.rect, point, 8)) {
+            return card.entryIndex;
+        }
+    }
+    return static_cast<size_t>(-1);
+}
+
 void EditEntry(HWND hwnd, size_t index) {
     if (index >= g_app.entries.size()) {
         return;
@@ -475,6 +501,59 @@ void EditEntry(HWND hwnd, size_t index) {
     RequestRender(hwnd);
 }
 
+void ShowContextMenu(HWND hwnd, POINT clientPoint, POINT screenPoint) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+
+    constexpr UINT editId = 4101;
+    constexpr UINT moveId = 4102;
+    constexpr UINT resizeId = 4103;
+    constexpr UINT deleteId = 4104;
+    constexpr UINT closeId = 4105;
+
+    size_t cardIndex = CardAt(hwnd, clientPoint);
+    if (cardIndex < g_app.entries.size()) {
+        AppendMenuW(menu, MF_STRING, editId, L"영상 수정");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(menu, MF_STRING, moveId, L"위치 이동");
+    AppendMenuW(menu, MF_STRING, resizeId, L"크기 조절");
+    AppendMenuW(menu, g_app.entries.empty() ? MF_STRING | MF_GRAYED : MF_STRING, deleteId, L"지우기");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, closeId, L"끄기");
+
+    SetForegroundWindow(hwnd);
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screenPoint.x, screenPoint.y + 8, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    g_app.armedTarget = AppState::PressTarget::None;
+
+    switch (command) {
+    case editId:
+        if (cardIndex < g_app.entries.size()) {
+            EditEntry(hwnd, cardIndex);
+        }
+        break;
+    case moveId:
+        g_app.armedTarget = AppState::PressTarget::Move;
+        ApplyCursorForTarget(g_app.armedTarget);
+        break;
+    case resizeId:
+        g_app.armedTarget = AppState::PressTarget::Resize;
+        ApplyCursorForTarget(g_app.armedTarget);
+        break;
+    case deleteId:
+        DeleteFromDialog(hwnd);
+        break;
+    case closeId:
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        break;
+    default:
+        break;
+    }
+}
+
 void FinishPress(HWND hwnd, POINT point) {
     if (!g_app.mouseDown) {
         return;
@@ -503,9 +582,6 @@ void FinishPress(HWND hwnd, POINT point) {
         }
         break;
     }
-    case AppState::PressTarget::Delete:
-        DeleteFromDialog(hwnd);
-        break;
     case AppState::PressTarget::Card:
         if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && PositionInVisible(g_app.pressEntryIndex) == g_app.scrollIndex) {
             OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
@@ -516,6 +592,10 @@ void FinishPress(HWND hwnd, POINT point) {
         break;
     default:
         break;
+    }
+    if (g_app.pressTarget == AppState::PressTarget::Move || g_app.pressTarget == AppState::PressTarget::Resize) {
+        g_app.armedTarget = AppState::PressTarget::None;
+        SaveCurrentWindowSettings(hwnd);
     }
     g_app.pressTarget = AppState::PressTarget::None;
     ReleaseCapture();
@@ -556,9 +636,6 @@ Layout BuildLayout(int width, int height) {
     Layout layout;
     layout.tagButton = {12, 14, 100, 28};
     layout.addButton = {std::max(12, width - 44), 14, 28, 28};
-    layout.deleteButton = {14, std::max(12, height - 38), 28, 28};
-    layout.moveHandle = {std::max(12, width / 2 - 32), std::max(12, height - 36), 64, 24};
-    layout.resizeHandle = {std::max(12, width - 42), std::max(12, height - 38), 30, 28};
 
     std::vector<size_t> visible = VisibleEntries();
     int count = static_cast<int>(visible.size());
@@ -746,38 +823,6 @@ void DrawTagButton(Graphics& graphics, const RectI& rect) {
     DrawText(graphics, g_app.activeTag, RectF(static_cast<float>(rect.x + 8), static_cast<float>(rect.y + 4), static_cast<float>(rect.w - 16), static_cast<float>(rect.h - 8)), 13.0f, Color(230, 0, 0, 0), StringAlignmentCenter);
 }
 
-void DrawDeleteButton(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(190, 110, 126, 150));
-    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(220, 0, 0, 0), 3.0f);
-    graphics.DrawLine(&pen, rect.x + 8, rect.y + 8, rect.x + rect.w - 8, rect.y + rect.h - 8);
-    graphics.DrawLine(&pen, rect.x + rect.w - 8, rect.y + 8, rect.x + 8, rect.y + rect.h - 8);
-}
-
-void DrawMoveHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(190, 110, 126, 150));
-    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(220, 0, 0, 0), 3.0f);
-    float centerX = static_cast<float>(rect.x + rect.w / 2);
-    float centerY = static_cast<float>(rect.y + rect.h / 2);
-    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX + 14.0f, centerY);
-    graphics.DrawLine(&pen, centerX, centerY - 7.0f, centerX, centerY + 7.0f);
-    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX - 8.0f, centerY - 5.0f);
-    graphics.DrawLine(&pen, centerX - 14.0f, centerY, centerX - 8.0f, centerY + 5.0f);
-    graphics.DrawLine(&pen, centerX + 14.0f, centerY, centerX + 8.0f, centerY - 5.0f);
-    graphics.DrawLine(&pen, centerX + 14.0f, centerY, centerX + 8.0f, centerY + 5.0f);
-}
-
-void DrawResizeHandle(Graphics& graphics, const RectI& rect) {
-    SolidBrush brush(Color(190, 110, 126, 150));
-    graphics.FillRectangle(&brush, rect.x, rect.y, rect.w, rect.h);
-    Pen pen(Color(220, 0, 0, 0), 3.0f);
-    int right = rect.x + rect.w - 7;
-    int bottom = rect.y + rect.h - 7;
-    graphics.DrawLine(&pen, right - 18, bottom, right, bottom - 18);
-    graphics.DrawLine(&pen, right - 9, bottom, right, bottom - 9);
-}
-
 void RenderWindow(HWND hwnd) {
     if (g_app.rendering) {
         return;
@@ -843,9 +888,6 @@ void RenderWindow(HWND hwnd) {
         }
         DrawTagButton(graphics, layout.tagButton);
         DrawAddButton(graphics, layout.addButton);
-        DrawDeleteButton(graphics, layout.deleteButton);
-        DrawMoveHandle(graphics, layout.moveHandle);
-        DrawResizeHandle(graphics, layout.resizeHandle);
         graphics.Flush(FlushIntentionFlush);
     }
 
@@ -962,21 +1004,16 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_RBUTTONUP: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        RECT client{};
-        GetClientRect(hwnd, &client);
-        Layout layout = BuildLayout(client.right - client.left, client.bottom - client.top);
-        for (const auto& card : layout.cards) {
-            if (ContainsExpanded(card.rect, point, 8)) {
-                EditEntry(hwnd, card.entryIndex);
-                return 0;
-            }
-        }
+        POINT screenPoint = point;
+        ClientToScreen(hwnd, &screenPoint);
+        ShowContextMenu(hwnd, point, screenPoint);
         return 0;
     }
     case WM_CAPTURECHANGED:
         if (g_app.mouseDown && reinterpret_cast<HWND>(lParam) != hwnd) {
             g_app.mouseDown = false;
             g_app.pressTarget = AppState::PressTarget::None;
+            g_app.armedTarget = AppState::PressTarget::None;
         }
         return 0;
     case WM_MOUSEWHEEL:
