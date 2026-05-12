@@ -25,6 +25,8 @@ namespace {
 
 constexpr wchar_t kMainClassName[] = L"BlackFixVideoShuffleWindow";
 constexpr wchar_t kAllTag[] = L"전체";
+constexpr UINT_PTR kCarouselTimerId = 11;
+constexpr DWORD kCarouselDurationMs = 260;
 
 struct AppState {
     HINSTANCE instance{};
@@ -34,6 +36,12 @@ struct AppState {
     WindowSettings settings;
     std::wstring activeTag{kAllTag};
     int scrollIndex{};
+    bool carouselAnimating{};
+    int animationFromIndex{};
+    int animationToIndex{};
+    int animationDirection{};
+    DWORD animationStarted{};
+    double animationProgress{};
     bool mouseDown{};
     bool mouseMoved{};
     bool rendering{};
@@ -60,6 +68,7 @@ void ScrollBy(int delta);
 void AddEntry(const AddResult& result);
 void OpenUrl(const std::wstring& url);
 void DeleteIndices(HWND hwnd, std::vector<size_t> indices);
+void ApplyTagAssignments(const std::wstring& tag, const std::vector<size_t>& indices);
 std::wstring ResolveTitle(const std::wstring& title, const std::wstring& url);
 void RenderWindow(HWND hwnd);
 void RequestRender(HWND hwnd);
@@ -278,6 +287,17 @@ int PositionInVisible(size_t entryIndex) {
     return 0;
 }
 
+int WrappedVisiblePosition(int index, int count) {
+    return (index % count + count) % count;
+}
+
+RectI InterpolatedRect(const RectI& from, const RectI& to, double progress) {
+    auto lerp = [progress](int a, int b) {
+        return static_cast<int>(a + (b - a) * progress);
+    };
+    return {lerp(from.x, to.x), lerp(from.y, to.y), lerp(from.w, to.w), lerp(from.h, to.h)};
+}
+
 AppState::PressTarget TargetAt(const Layout& layout, POINT point, size_t& entryIndex) {
     if (g_app.armedTarget == AppState::PressTarget::Move || g_app.armedTarget == AppState::PressTarget::Resize) {
         return g_app.armedTarget;
@@ -471,6 +491,9 @@ void DeleteIndices(HWND hwnd, std::vector<size_t> indices) {
     } else {
         g_app.scrollIndex = std::clamp(g_app.scrollIndex, 0, static_cast<int>(visible.size()) - 1);
     }
+    KillTimer(hwnd, kCarouselTimerId);
+    g_app.carouselAnimating = false;
+    g_app.animationProgress = 0.0;
     SaveLinks(g_app.entries);
     RequestRender(hwnd);
 }
@@ -485,6 +508,15 @@ void DeleteActiveTag(HWND hwnd) {
     std::wstring messageText = g_app.activeTag + L" 태그의 " + std::to_wstring(indices.size()) + L"개 영상을 모두 지우시겠습니까?";
     if (MessageBoxW(hwnd, messageText.c_str(), L"BlackFix VideoShuffle", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
         DeleteIndices(hwnd, std::move(indices));
+    }
+}
+
+void ApplyTagAssignments(const std::wstring& tag, const std::vector<size_t>& indices) {
+    std::wstring normalized = NormalizedTag(tag);
+    for (size_t index : indices) {
+        if (index < g_app.entries.size()) {
+            g_app.entries[index].tag = normalized;
+        }
     }
 }
 
@@ -510,17 +542,20 @@ void EditEntry(HWND hwnd, size_t index) {
     input.title = g_app.entries[index].title;
     input.url = g_app.entries[index].url;
     input.tag = NormalizedTag(g_app.entries[index].tag);
-    AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), input);
+    AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
     if (!result.accepted) {
         return;
     }
 
+    ApplyTagAssignments(result.tag, result.tagAssignments);
     bool urlChanged = g_app.entries[index].url != result.url;
-    g_app.entries[index].title = ResolveTitle(result.title, result.url);
-    g_app.entries[index].url = result.url;
-    g_app.entries[index].tag = NormalizedTag(result.tag);
-    if (urlChanged) {
-        g_app.entries[index].thumbnail = LoadThumbnail(result.url);
+    if (!result.url.empty()) {
+        g_app.entries[index].title = ResolveTitle(result.title, result.url);
+        g_app.entries[index].url = result.url;
+        g_app.entries[index].tag = NormalizedTag(result.tag);
+        if (urlChanged) {
+            g_app.entries[index].thumbnail = LoadThumbnail(result.url);
+        }
     }
     if (!EntryInActiveTag(g_app.entries[index])) {
         g_app.activeTag = NormalizedTag(g_app.entries[index].tag);
@@ -610,9 +645,17 @@ void FinishPress(HWND hwnd, POINT point) {
     case AppState::PressTarget::Add: {
         VideoDialogInput input;
         input.tag = g_app.activeTag;
-        AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), input);
+        AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
         if (result.accepted) {
-            AddEntry(result);
+            ApplyTagAssignments(result.tag, result.tagAssignments);
+            if (!result.url.empty()) {
+                AddEntry(result);
+            } else {
+                g_app.activeTag = NormalizedTag(result.tag);
+                g_app.scrollIndex = 0;
+                SaveLinks(g_app.entries);
+                RequestRender(hwnd);
+            }
         }
         break;
     }
@@ -620,8 +663,10 @@ void FinishPress(HWND hwnd, POINT point) {
         if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size() && PositionInVisible(g_app.pressEntryIndex) == g_app.scrollIndex) {
             OpenUrl(g_app.entries[g_app.pressEntryIndex].url);
         } else if (!g_app.mouseMoved && g_app.pressEntryIndex < g_app.entries.size()) {
-            g_app.scrollIndex = PositionInVisible(g_app.pressEntryIndex);
-            RequestRender(hwnd);
+            int target = PositionInVisible(g_app.pressEntryIndex);
+            int count = static_cast<int>(VisibleEntries().size());
+            int forward = WrappedVisiblePosition(g_app.scrollIndex + 1, count);
+            ScrollBy(target == forward ? 1 : -1);
         }
         break;
     default:
@@ -668,8 +713,8 @@ void ResolveMissingTitles() {
 
 Layout BuildLayout(int width, int height) {
     Layout layout;
-    layout.tagButton = {12, 14, 100, 28};
-    layout.addButton = {std::max(12, width - 44), 14, 28, 28};
+    layout.tagButton = {12, 24, 100, 28};
+    layout.addButton = {std::max(12, width - 44), 24, 28, 28};
 
     std::vector<size_t> visible = VisibleEntries();
     int count = static_cast<int>(visible.size());
@@ -683,10 +728,10 @@ Layout BuildLayout(int width, int height) {
         g_app.scrollIndex = (g_app.scrollIndex % count + count) % count;
     }
 
-    int top = 58;
-    int bottom = 58;
-    int gap = std::clamp(width / 28, 14, 32);
-    int availableWidth = std::max(120, width - 24);
+    int top = 60;
+    int bottom = 12;
+    int gap = std::clamp(width / 34, 10, 26);
+    int availableWidth = std::max(120, width - 8);
     int availableHeight = std::max(96, height - top - bottom);
     double sideScale = 0.78;
     double cardAspect = 1.52;
@@ -714,21 +759,45 @@ Layout BuildLayout(int width, int height) {
     }
 
     int groupX = (width - totalWidth) / 2;
-    int centerX = count == 1 ? (width - centerWidth) / 2 : groupX;
+    int centerX = (width - centerWidth) / 2;
     if (count > 2) {
         centerX = groupX + sideWidth + gap;
     }
     int centerY = top + (availableHeight - centerHeight) / 2;
     int sideY = centerY + (centerHeight - sideHeight) / 2;
-    int leftX = groupX;
+    int leftX = centerX - gap - sideWidth;
     int rightX = centerX + centerWidth + gap;
 
     auto wrapIndex = [&visible, count](int index) {
-        return visible[static_cast<size_t>((index % count + count) % count)];
+        return visible[static_cast<size_t>(WrappedVisiblePosition(index, count))];
     };
 
     if (count == 1) {
         layout.cards.push_back({visible[0], {centerX, centerY, centerWidth, centerHeight}, true});
+    } else if (g_app.carouselAnimating) {
+        double progress = std::clamp(g_app.animationProgress, 0.0, 1.0);
+        RectI centerRect{centerX, centerY, centerWidth, centerHeight};
+        RectI leftRect{leftX, sideY, sideWidth, sideHeight};
+        RectI rightRect{rightX, sideY, sideWidth, sideHeight};
+        RectI offLeft{leftX - sideWidth - gap, sideY, sideWidth, sideHeight};
+        RectI offRight{rightX + sideWidth + gap, sideY, sideWidth, sideHeight};
+
+        int from = g_app.animationFromIndex;
+        if (g_app.animationDirection > 0) {
+            if (count > 2) {
+                layout.cards.push_back({wrapIndex(from - 1), InterpolatedRect(leftRect, offLeft, progress), false});
+                layout.cards.push_back({wrapIndex(from + 2), InterpolatedRect(offRight, rightRect, progress), false});
+            }
+            layout.cards.push_back({wrapIndex(from), InterpolatedRect(centerRect, leftRect, progress), progress < 0.5});
+            layout.cards.push_back({wrapIndex(from + 1), InterpolatedRect(rightRect, centerRect, progress), progress >= 0.5});
+        } else {
+            if (count > 2) {
+                layout.cards.push_back({wrapIndex(from + 1), InterpolatedRect(rightRect, offRight, progress), false});
+                layout.cards.push_back({wrapIndex(from - 2), InterpolatedRect(offLeft, leftRect, progress), false});
+            }
+            layout.cards.push_back({wrapIndex(from), InterpolatedRect(centerRect, rightRect, progress), progress < 0.5});
+            layout.cards.push_back({wrapIndex(from - 1), InterpolatedRect(leftRect, centerRect, progress), progress >= 0.5});
+        }
     } else if (count == 2) {
         layout.cards.push_back({wrapIndex(g_app.scrollIndex + 1), {rightX, sideY, sideWidth, sideHeight}, false});
         layout.cards.push_back({wrapIndex(g_app.scrollIndex), {centerX, centerY, centerWidth, centerHeight}, true});
@@ -962,6 +1031,9 @@ void AddEntry(const AddResult& result) {
     g_app.entries.push_back(std::move(entry));
     g_app.activeTag = NormalizedTag(g_app.entries.back().tag);
     g_app.scrollIndex = PositionInVisible(g_app.entries.size() - 1);
+    KillTimer(g_app.window, kCarouselTimerId);
+    g_app.carouselAnimating = false;
+    g_app.animationProgress = 0.0;
     SaveLinks(g_app.entries);
     RequestRender(g_app.window);
 }
@@ -975,14 +1047,25 @@ void ScrollBy(int delta) {
     if (count <= 1) {
         return;
     }
-    int before = g_app.scrollIndex;
-    g_app.scrollIndex = (g_app.scrollIndex + delta) % count;
-    if (g_app.scrollIndex < 0) {
-        g_app.scrollIndex += count;
+    if (g_app.carouselAnimating) {
+        return;
     }
-    if (before != g_app.scrollIndex) {
-        RequestRender(g_app.window);
+
+    int direction = delta < 0 ? -1 : 1;
+    int from = WrappedVisiblePosition(g_app.scrollIndex, count);
+    int to = WrappedVisiblePosition(from + direction, count);
+    if (from == to) {
+        return;
     }
+
+    g_app.animationFromIndex = from;
+    g_app.animationToIndex = to;
+    g_app.animationDirection = direction;
+    g_app.animationStarted = GetTickCount();
+    g_app.animationProgress = 0.0;
+    g_app.carouselAnimating = true;
+    SetTimer(g_app.window, kCarouselTimerId, 16, nullptr);
+    RequestRender(g_app.window);
 }
 
 LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1078,6 +1161,21 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_app.wheelAccum += WHEEL_DELTA;
         }
         return 0;
+    case WM_TIMER:
+        if (wParam == kCarouselTimerId && g_app.carouselAnimating) {
+            DWORD elapsed = GetTickCount() - g_app.animationStarted;
+            double t = std::min(1.0, static_cast<double>(elapsed) / static_cast<double>(kCarouselDurationMs));
+            g_app.animationProgress = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+            if (t >= 1.0) {
+                KillTimer(hwnd, kCarouselTimerId);
+                g_app.carouselAnimating = false;
+                g_app.animationProgress = 0.0;
+                g_app.scrollIndex = g_app.animationToIndex;
+            }
+            RequestRender(hwnd);
+            return 0;
+        }
+        break;
     case WM_SIZE:
         RequestRender(hwnd);
         return 0;
