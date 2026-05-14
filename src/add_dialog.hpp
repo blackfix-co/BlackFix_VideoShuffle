@@ -10,7 +10,6 @@
 struct AddResult {
     bool accepted{};
     bool tagCreated{};
-    bool preview{};
     std::wstring title;
     std::wstring url;
     std::wstring tag{L"전체"};
@@ -20,7 +19,6 @@ struct AddResult {
 
 struct VideoDialogInput {
     bool editing{};
-    bool preview{};
     std::wstring title;
     std::wstring url;
     std::wstring tag{L"전체"};

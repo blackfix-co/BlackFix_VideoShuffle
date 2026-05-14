@@ -32,7 +32,6 @@ struct LinkEntry {
     std::wstring title;
     std::wstring url;
     std::wstring tag{L"전체"};
-    bool preview{};
     std::unique_ptr<Gdiplus::Bitmap> thumbnail;
 };
 

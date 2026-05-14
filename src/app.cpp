@@ -18,8 +18,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cwctype>
-#include <filesystem>
-#include <fstream>
 
 using namespace Gdiplus;
 
@@ -220,13 +218,6 @@ RectI UnionRect(const RectI& left, const RectI& right) {
 
 RectI VisibleContentBounds(int width, int height) {
     Layout layout = BuildLayout(width, height);
-    auto activeCard = std::find_if(layout.cards.begin(), layout.cards.end(), [](const CardLayout& card) {
-        return card.active;
-    });
-    if (activeCard != layout.cards.end()) {
-        return UnionRect(activeCard->rect, layout.tagButton);
-    }
-
     RectI bounds = layout.tagButton;
     bool hasBounds = bounds.w > 0 && bounds.h > 0;
     for (const auto& card : layout.cards) {
@@ -376,82 +367,6 @@ std::vector<std::wstring> Tags() {
 
 bool EntryInActiveTag(const LinkEntry& entry) {
     return g_app.activeTag == kAllTag || NormalizedTag(entry.tag) == g_app.activeTag;
-}
-
-std::wstring ExtractVideoIdAt(const std::wstring& url, size_t start) {
-    std::wstring id;
-    for (size_t i = start; i < url.size(); ++i) {
-        wchar_t ch = url[i];
-        bool allowed = (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9') || ch == L'_' || ch == L'-';
-        if (!allowed) {
-            break;
-        }
-        id.push_back(ch);
-    }
-    if (id.size() >= 11) {
-        id.resize(11);
-        return id;
-    }
-    return {};
-}
-
-std::wstring YoutubeVideoId(const std::wstring& url) {
-    std::wstring lower = LowerCopy(url);
-    const std::vector<std::wstring> patterns = {
-        L"youtu.be/",
-        L"/shorts/",
-        L"/embed/",
-        L"/live/"
-    };
-    for (const auto& pattern : patterns) {
-        size_t pos = lower.find(pattern);
-        if (pos != std::wstring::npos) {
-            return ExtractVideoIdAt(url, pos + pattern.size());
-        }
-    }
-    size_t query = lower.find(L"v=");
-    if (query != std::wstring::npos) {
-        return ExtractVideoIdAt(url, query + 2);
-    }
-    return {};
-}
-
-std::wstring PreviewUrl(const std::wstring& url) {
-    std::wstring id = YoutubeVideoId(url);
-    if (id.empty()) {
-        return url;
-    }
-    return L"https://www.youtube.com/watch?v=" + id + L"&autoplay=1&mute=1&loop=1&playlist=" + id + L"&start=0&end=60";
-}
-
-bool OpenPreviewPlayer(const std::wstring& url) {
-    std::wstring id = YoutubeVideoId(url);
-    if (id.empty()) {
-        return false;
-    }
-
-    std::wstring source = L"https://www.youtube.com/embed/" + id + L"?autoplay=1&mute=1&loop=1&playlist=" + id + L"&start=0&end=60&playsinline=1&rel=0";
-    std::wstring html =
-        LR"(<!doctype html><html><head><meta charset="utf-8"><title>BlackFix VideoShuffle Preview</title><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;inset:0;width:100%;height:100%;border:0}</style></head><body><iframe id="player" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen src=")" +
-        source +
-        LR"("></iframe><script>const player=document.getElementById('player');const base=player.src;setInterval(()=>{player.src=base+'&reload='+Date.now();},60000);</script></body></html>)";
-
-    try {
-        std::filesystem::path path = std::filesystem::temp_directory_path() / (L"BlackFix_VideoShuffle_preview_" + id + L".html");
-        std::ofstream file(path, std::ios::binary | std::ios::trunc);
-        if (!file) {
-            return false;
-        }
-        std::string bytes = ToUtf8(html);
-        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        if (!file) {
-            return false;
-        }
-        ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 std::vector<size_t> VisibleEntries() {
@@ -717,7 +632,6 @@ void EditEntry(HWND hwnd, size_t index) {
     input.title = g_app.entries[index].title;
     input.url = g_app.entries[index].url;
     input.tag = NormalizedTag(g_app.entries[index].tag);
-    input.preview = g_app.entries[index].preview;
     AddResult result = ShowVideoDialog(g_app.instance, hwnd, Tags(), g_app.entries, input);
     if (result.tagCreated) {
         ApplyTagAssignments(CreatedTagName(result), result.tagAssignments);
@@ -737,7 +651,6 @@ void EditEntry(HWND hwnd, size_t index) {
         g_app.entries[index].title = ResolveTitle(result.title, result.url);
         g_app.entries[index].url = result.url;
         g_app.entries[index].tag = NormalizedTag(result.tag);
-        g_app.entries[index].preview = result.preview;
         if (urlChanged) {
             g_app.entries[index].thumbnail = LoadThumbnail(result.url);
         }
@@ -1220,7 +1133,6 @@ void AddEntry(const AddResult& result) {
     entry.title = ResolveTitle(result.title, result.url);
     entry.url = result.url;
     entry.tag = NormalizedTag(result.tag);
-    entry.preview = result.preview;
     AddKnownTag(entry.tag);
     entry.thumbnail = LoadThumbnail(entry.url);
     g_app.entries.push_back(std::move(entry));
@@ -1239,10 +1151,7 @@ void OpenUrl(const std::wstring& url) {
 }
 
 void OpenEntry(const LinkEntry& entry) {
-    if (entry.preview && OpenPreviewPlayer(entry.url)) {
-        return;
-    }
-    OpenUrl(entry.preview ? PreviewUrl(entry.url) : entry.url);
+    OpenUrl(entry.url);
 }
 
 void ScrollBy(int delta) {
