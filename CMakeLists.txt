@@ -3,16 +3,16 @@ cmake_minimum_required(VERSION 3.20)
 project(BlackFix_VideoShuffle LANGUAGES CXX)
 
 add_executable(BlackFix_VideoShuffle WIN32
-    src/add_dialog.cpp
-    src/app.cpp
-    src/delete_dialog.cpp
-    src/http.cpp
-    src/link_title.cpp
-    src/main.cpp
-    src/storage.cpp
-    src/thumbnail.cpp
-    src/updater.cpp
-    src/utils.cpp
+    src/BFadd_dialog.cpp
+    src/BFapp.cpp
+    src/BFdelete_dialog.cpp
+    src/BFhttp.cpp
+    src/BFlink_title.cpp
+    src/BFmain.cpp
+    src/BFstorage.cpp
+    src/BFthumbnail.cpp
+    src/BFupdater.cpp
+    src/BFutils.cpp
 )
 
 target_compile_features(BlackFix_VideoShuffle PRIVATE cxx_std_17)

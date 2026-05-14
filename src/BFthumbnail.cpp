@@ -1,7 +1,7 @@
-#include "thumbnail.hpp"
+#include "BFthumbnail.hpp"
 
-#include "http.hpp"
-#include "utils.hpp"
+#include "BFhttp.hpp"
+#include "BFutils.hpp"
 
 #include <windows.h>
 #include <objidl.h>

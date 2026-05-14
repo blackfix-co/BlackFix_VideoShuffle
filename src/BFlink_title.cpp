@@ -1,7 +1,7 @@
-#include "link_title.hpp"
+#include "BFlink_title.hpp"
 
-#include "http.hpp"
-#include "utils.hpp"
+#include "BFhttp.hpp"
+#include "BFutils.hpp"
 
 #include <algorithm>
 #include <cwctype>

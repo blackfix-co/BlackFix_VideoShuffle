@@ -1,4 +1,4 @@
-#include "delete_dialog.hpp"
+#include "BFdelete_dialog.hpp"
 
 #include <windowsx.h>
 #include <dwmapi.h>

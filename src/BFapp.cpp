@@ -1,12 +1,12 @@
-#include "app.hpp"
+#include "BFapp.hpp"
 
-#include "add_dialog.hpp"
-#include "delete_dialog.hpp"
-#include "link_title.hpp"
-#include "storage.hpp"
-#include "thumbnail.hpp"
-#include "updater.hpp"
-#include "utils.hpp"
+#include "BFadd_dialog.hpp"
+#include "BFdelete_dialog.hpp"
+#include "BFlink_title.hpp"
+#include "BFstorage.hpp"
+#include "BFthumbnail.hpp"
+#include "BFupdater.hpp"
+#include "BFutils.hpp"
 
 #include <windowsx.h>
 #include <gdiplus.h>

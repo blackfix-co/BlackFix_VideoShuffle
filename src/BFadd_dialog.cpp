@@ -1,6 +1,6 @@
-#include "add_dialog.hpp"
+#include "BFadd_dialog.hpp"
 
-#include "utils.hpp"
+#include "BFutils.hpp"
 
 #include <windowsx.h>
 #include <dwmapi.h>

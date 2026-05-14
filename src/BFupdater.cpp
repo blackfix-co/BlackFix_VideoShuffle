@@ -1,6 +1,6 @@
-#include "updater.hpp"
+#include "BFupdater.hpp"
 
-#include "http.hpp"
+#include "BFhttp.hpp"
 
 #include <windows.h>
 
