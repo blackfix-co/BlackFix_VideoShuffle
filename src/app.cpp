@@ -871,6 +871,9 @@ Layout BuildLayout(int width, int height) {
 
     int groupX = (width - totalWidth) / 2;
     int centerX = (width - centerWidth) / 2;
+    if (count == 2) {
+        centerX = groupX;
+    }
     if (count > 2) {
         centerX = groupX + sideWidth + gap;
     }
